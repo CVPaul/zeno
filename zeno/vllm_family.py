@@ -8,6 +8,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
+from .llmfit import recommend_model
+
 
 DEFAULT_MLX_MODEL = "mlx-community/Qwen2.5-7B-Instruct-4bit"
 DEFAULT_VLLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"
@@ -23,6 +25,9 @@ def default_model_name(model: str | None = None, backend: str | None = None) -> 
     if model:
         return model
     selected_backend = backend or default_backend()
+    recommendation = recommend_model(selected_backend)
+    if recommendation is not None:
+        return recommendation.model
     if selected_backend == "vllm-mlx":
         return DEFAULT_MLX_MODEL
     return DEFAULT_VLLM_MODEL

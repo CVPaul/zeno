@@ -11,6 +11,7 @@ from unittest.mock import patch
 from zeno import Agent, ChatResponse, DEFAULT_VLLM_MODEL, MLXChatModel, Message, OllamaChatModel, OllamaManager, OpenAICompatibleChatModel, SessionStore, ToolCall, VllmFamilyManager, default_backend, default_local_model, default_model_name, tool_schema
 from zeno.models import _parse_tool_calls, MLXChatModel as ConcreteMLXChatModel
 from zeno.cli import main as cli_main
+from zeno.llmfit import LlmfitRecommendation, parse_recommended_model, recommend_model
 from zeno.sessions import default_session_dir
 
 
@@ -129,11 +130,18 @@ class CliTests(unittest.TestCase):
         self.assertIsInstance(default_local_model(), OpenAICompatibleChatModel)
 
     def test_default_model_is_vllm_family_model(self) -> None:
-        self.assertEqual(default_backend(), "vllm")
-        self.assertEqual(default_model_name(), DEFAULT_VLLM_MODEL)
-        self.assertEqual(default_local_model().model, DEFAULT_VLLM_MODEL)
-        self.assertEqual(default_model_name("Qwen/Qwen2.5-14B-Instruct"), "Qwen/Qwen2.5-14B-Instruct")
-        self.assertEqual(default_local_model("Qwen/Qwen2.5-14B-Instruct").model, "Qwen/Qwen2.5-14B-Instruct")
+        with patch("zeno.vllm_family.recommend_model", return_value=None):
+            self.assertEqual(default_backend(), "vllm")
+            self.assertEqual(default_model_name(), DEFAULT_VLLM_MODEL)
+            self.assertEqual(default_local_model().model, DEFAULT_VLLM_MODEL)
+            self.assertEqual(default_model_name("Qwen/Qwen2.5-14B-Instruct"), "Qwen/Qwen2.5-14B-Instruct")
+            self.assertEqual(default_local_model("Qwen/Qwen2.5-14B-Instruct").model, "Qwen/Qwen2.5-14B-Instruct")
+
+    def test_default_model_uses_llmfit_recommendation_when_available(self) -> None:
+        recommendation = LlmfitRecommendation(model="Qwen/Qwen2.5-14B-Instruct", source="llmfit")
+
+        with patch("zeno.vllm_family.recommend_model", return_value=recommendation):
+            self.assertEqual(default_model_name(backend="vllm"), "Qwen/Qwen2.5-14B-Instruct")
 
     def test_cli_without_injected_agent_ensures_ollama_before_chat(self) -> None:
         stdout = io.StringIO()
@@ -327,6 +335,19 @@ class CliTests(unittest.TestCase):
         ensure_model.assert_called_once_with("Qwen/Qwen2.5-14B-Instruct", "vllm")
         self.assertIn("task done", stdout.getvalue())
 
+    def test_cli_serve_starts_backend_without_chat(self) -> None:
+        stdout = io.StringIO()
+        fake_model = FakeModel([])
+        fake_model.model = "Qwen/Qwen2.5-7B-Instruct"
+
+        with patch("zeno.cli.ensure_default_local_model", return_value=fake_model) as ensure_model:
+            with redirect_stdout(stdout):
+                exit_code = cli_main(["--backend", "vllm", "serve"])
+
+        self.assertEqual(exit_code, 0)
+        ensure_model.assert_called_once_with(None, "vllm")
+        self.assertIn("serving model: Qwen/Qwen2.5-7B-Instruct", stdout.getvalue())
+
     def test_cli_task_create_error_is_user_facing(self) -> None:
         class BrokenModel:
             def chat(
@@ -428,6 +449,23 @@ class OllamaManagerTests(unittest.TestCase):
         manager._pull_model()
 
         self.assertEqual(manager.pull_requests, [("/api/pull", {"name": "qwen3:14b", "stream": False}, None)])
+
+
+class LlmfitTests(unittest.TestCase):
+    def test_parse_recommended_model_from_list(self) -> None:
+        self.assertEqual(parse_recommended_model('[{"model":"Qwen/Qwen2.5-14B-Instruct"}]'), "Qwen/Qwen2.5-14B-Instruct")
+
+    def test_parse_recommended_model_from_wrapped_results(self) -> None:
+        text = '{"recommendations":[{"name":"mlx-community/Qwen2.5-14B-Instruct-4bit"}]}'
+
+        self.assertEqual(parse_recommended_model(text), "mlx-community/Qwen2.5-14B-Instruct-4bit")
+
+    def test_parse_recommended_model_returns_none_for_invalid_json(self) -> None:
+        self.assertIsNone(parse_recommended_model("not json"))
+
+    def test_recommend_model_returns_none_when_llmfit_missing(self) -> None:
+        with patch("zeno.llmfit.shutil.which", return_value=None):
+            self.assertIsNone(recommend_model("vllm"))
 
 
 class VllmFamilyManagerTests(unittest.TestCase):

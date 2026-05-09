@@ -14,6 +14,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--continue", dest="continue_session", action="store_true", help="Continue the latest task session in this workspace")
     subparsers = parser.add_subparsers(dest="command")
 
+    subparsers.add_parser("serve", help="Start the local model server and keep it running")
+
     task = subparsers.add_parser("task", help="Run one-off tasks")
     task_subparsers = task.add_subparsers(dest="task_command", required=True)
     create = task_subparsers.add_parser("create", help="Run a one-off task and record it as a session")
@@ -88,7 +90,7 @@ def main(argv: list[str] | None = None, agent: Agent | None = None, store: Sessi
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.command is None or args.command == "task":
+    if args.command is None or args.command in {"task", "serve"}:
         if args.command == "task" and args.task_command == "list":
             return list_tasks(store)
         if args.command is None and args.continue_session:
@@ -108,6 +110,9 @@ def main(argv: list[str] | None = None, agent: Agent | None = None, store: Sessi
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
+        if args.command == "serve":
+            print(f"serving model: {selected_agent.model.model}")
+            return 0
         if args.command == "task" and args.task_command == "create":
             return run_task(args.description, selected_agent, store)
         return run_chat(selected_agent, store)
