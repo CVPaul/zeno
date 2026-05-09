@@ -35,6 +35,14 @@ Zeno 会按平台选择后端：
 - macOS arm64：`vllm-mlx`
 - 其它平台：`vllm`
 
+如果安装了 `llmfit`（`.[mac]` / `.[cuda]` 会安装），Zeno 会先调用：
+
+```bash
+llmfit recommend --json --limit 1 --use-case coding --force-runtime <runtime>
+```
+
+然后用推荐模型启动服务；没有 `llmfit` 时回退到内置默认模型。
+
 也可以手动指定：
 
 ```bash
@@ -43,6 +51,14 @@ zeno --backend vllm
 ```
 
 ## 任务命令
+
+只启动本地模型服务：
+
+```bash
+zeno serve
+```
+
+它会使用 `llmfit` 推荐的模型；如果 `llmfit` 不可用，就使用内置默认模型。
 
 执行一次性任务：
 

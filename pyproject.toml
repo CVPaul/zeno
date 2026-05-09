@@ -24,8 +24,8 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-mac = ["vllm-mlx>=0.2.7"]
-cuda = ["vllm>=0.10"]
+mac = ["llmfit>=0.9", "vllm-mlx>=0.2.7"]
+cuda = ["llmfit>=0.9", "vllm>=0.10"]
 
 [project.scripts]
 zeno = "zeno.cli:main"
