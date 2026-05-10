@@ -5,6 +5,8 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
+from .logging import VerboseLogger
+
 
 @dataclass(frozen=True)
 class LlmfitRecommendation:
@@ -12,18 +14,33 @@ class LlmfitRecommendation:
     source: str
 
 
-def recommend_model(backend: str, use_case: str = "coding") -> LlmfitRecommendation | None:
+def recommend_model(backend: str, use_case: str = "coding", log: VerboseLogger | None = None) -> LlmfitRecommendation | None:
     if shutil.which("llmfit") is None:
+        if log is not None:
+            log("llmfit not found; using built-in default model")
         return None
     runtime = "mlx" if backend == "vllm-mlx" else "vllm"
     command = ["llmfit", "recommend", "--json", "--limit", "1", "--use-case", use_case, "--force-runtime", runtime]
+    if log is not None:
+        log(f"running model recommendation: {' '.join(command)}")
     try:
         result = subprocess.run(command, check=True, capture_output=True, text=True)
-    except (OSError, subprocess.CalledProcessError):
+    except OSError as exc:
+        if log is not None:
+            log(f"llmfit failed to start: {exc}; using built-in default model")
+        return None
+    except subprocess.CalledProcessError as exc:
+        if log is not None:
+            detail = exc.stderr.strip() if exc.stderr else str(exc)
+            log(f"llmfit recommendation failed: {detail}; using built-in default model")
         return None
     model = parse_recommended_model(result.stdout)
     if model is None:
+        if log is not None:
+            log("llmfit returned no usable model; using built-in default model")
         return None
+    if log is not None:
+        log(f"llmfit recommended model: {model}")
     return LlmfitRecommendation(model=model, source="llmfit")
 
 

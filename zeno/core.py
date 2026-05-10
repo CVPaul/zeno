@@ -6,6 +6,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from .logging import VerboseLogger
 from .models import OpenAICompatibleChatModel
 from .types import ChatModel, Message, Tool, ToolCall
 from .vllm_family import VllmFamilyManager, default_backend, default_model_name as platform_default_model_name
@@ -107,19 +108,38 @@ class Agent:
         }
 
 
-def default_model_name(model: str | None = None, backend: str | None = None) -> str:
-    return platform_default_model_name(model or os.environ.get("ZENO_MODEL"), backend)
+def default_model_name(model: str | None = None, backend: str | None = None, log: VerboseLogger | None = None) -> str:
+    return platform_default_model_name(model or os.environ.get("ZENO_MODEL"), backend, log=log)
 
 
-def default_local_model(model: str | None = None, backend: str | None = None) -> OpenAICompatibleChatModel:
+def default_local_model(
+    model: str | None = None,
+    backend: str | None = None,
+    log: VerboseLogger | None = None,
+    device: str | None = None,
+) -> OpenAICompatibleChatModel:
     selected_backend = backend or os.environ.get("ZENO_BACKEND") or default_backend()
-    selected_model = default_model_name(model, selected_backend)
+    if log is not None:
+        log(f"selected backend: {selected_backend}")
+    selected_model = default_model_name(model, selected_backend, log=log)
     return OpenAICompatibleChatModel(model=selected_model, base_url="http://localhost:8000/v1")
 
 
-def ensure_default_local_model(model: str | None = None, backend: str | None = None) -> OpenAICompatibleChatModel:
+def ensure_default_local_model(
+    model: str | None = None,
+    backend: str | None = None,
+    log: VerboseLogger | None = None,
+    device: str | None = None,
+) -> OpenAICompatibleChatModel:
     selected_backend = backend or os.environ.get("ZENO_BACKEND") or default_backend()
-    selected_model = default_model_name(model, selected_backend)
-    manager = VllmFamilyManager(model=selected_model, backend=selected_backend)
+    if log is not None:
+        log(f"selected backend: {selected_backend}")
+    selected_model = default_model_name(model, selected_backend, log=log)
+    selected_device = device or os.environ.get("ZENO_DEVICE")
+    if log is not None and selected_device is not None:
+        log(f"selected device override: {selected_device}")
+    manager = VllmFamilyManager(model=selected_model, backend=selected_backend, log=log, device=selected_device)
     manager.ensure_ready()
+    if log is not None:
+        log(f"using OpenAI-compatible endpoint: {manager.openai_base_url()}")
     return OpenAICompatibleChatModel(model=selected_model, base_url=manager.openai_base_url())

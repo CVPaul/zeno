@@ -4,6 +4,7 @@ import argparse
 import sys
 
 from .core import Agent, ensure_default_local_model
+from .logging import verbose_logger
 from .sessions import SessionStore
 
 
@@ -11,6 +12,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="zeno", description="Minimal local-first agent CLI")
     parser.add_argument("--backend", choices=["vllm-mlx", "vllm"], help="Model backend to manage for this session")
     parser.add_argument("--model", help="Model to use for this chat session")
+    parser.add_argument("--device", choices=["auto", "cuda", "cpu"], help="vLLM device override for debugging or CPU-only environments")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Show backend startup and readiness details")
     parser.add_argument("--continue", dest="continue_session", action="store_true", help="Continue the latest task session in this workspace")
     subparsers = parser.add_subparsers(dest="command")
 
@@ -89,6 +92,9 @@ def run_with_session_history(agent: Agent, store: SessionStore, session_id: str)
 def main(argv: list[str] | None = None, agent: Agent | None = None, store: SessionStore | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    log = verbose_logger(args.verbose)
+    if log is not None:
+        log(f"command={args.command or 'chat'} backend={args.backend or 'auto'} model={args.model or 'auto'}")
 
     if args.command is None or args.command in {"task", "serve"}:
         if args.command == "task" and args.task_command == "list":
@@ -100,13 +106,13 @@ def main(argv: list[str] | None = None, agent: Agent | None = None, store: Sessi
                 print("error: no task sessions found in this workspace", file=sys.stderr)
                 return 1
             try:
-                selected_agent = agent or Agent(model=ensure_default_local_model(args.model, args.backend))
+                selected_agent = agent or Agent(model=_ensure_model(args.model, args.backend, log, args.device))
             except RuntimeError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return 1
             return run_chat(selected_agent, session_store, session_id=session_id)
         try:
-            selected_agent = agent or Agent(model=ensure_default_local_model(args.model, args.backend))
+            selected_agent = agent or Agent(model=_ensure_model(args.model, args.backend, log, args.device))
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
@@ -119,3 +125,11 @@ def main(argv: list[str] | None = None, agent: Agent | None = None, store: Sessi
 
     parser.error(f"unknown command: {args.command}")
     return 2
+
+
+def _ensure_model(model: str | None, backend: str | None, log: object | None, device: str | None) -> object:
+    if log is None:
+        if device is None:
+            return ensure_default_local_model(model, backend)
+        return ensure_default_local_model(model, backend, device=device)
+    return ensure_default_local_model(model, backend, log=log, device=device)

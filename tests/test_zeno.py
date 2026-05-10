@@ -348,6 +348,17 @@ class CliTests(unittest.TestCase):
         ensure_model.assert_called_once_with(None, "vllm")
         self.assertIn("serving model: Qwen/Qwen2.5-7B-Instruct", stdout.getvalue())
 
+    def test_cli_device_option_passes_backend_override(self) -> None:
+        fake_model = FakeModel([])
+        fake_model.model = "Qwen/Qwen2.5-7B-Instruct"
+
+        with patch("zeno.cli.ensure_default_local_model", return_value=fake_model) as ensure_model:
+            with redirect_stdout(io.StringIO()):
+                exit_code = cli_main(["--backend", "vllm", "--device", "cpu", "serve"])
+
+        self.assertEqual(exit_code, 0)
+        ensure_model.assert_called_once_with(None, "vllm", device="cpu")
+
     def test_cli_task_create_error_is_user_facing(self) -> None:
         class BrokenModel:
             def chat(
@@ -480,11 +491,58 @@ class VllmFamilyManagerTests(unittest.TestCase):
 
         self.assertEqual(manager._command(), ["vllm", "serve", "Qwen/Qwen2.5-7B-Instruct", "--port", "8000"])
 
+    def test_vllm_command_accepts_device_override(self) -> None:
+        manager = VllmFamilyManager(model="Qwen/Qwen2.5-0.5B-Instruct", backend="vllm", device="cpu")
+
+        self.assertEqual(manager._command(), ["vllm", "serve", "Qwen/Qwen2.5-0.5B-Instruct", "--port", "8000", "--device", "cpu"])
+
     def test_unsupported_backend_raises(self) -> None:
         manager = VllmFamilyManager(model="model", backend="bad")
 
         with self.assertRaisesRegex(RuntimeError, "Unsupported backend"):
             manager._command()
+
+    def test_verbose_manager_logs_missing_command_check(self) -> None:
+        messages: list[str] = []
+        manager = VllmFamilyManager(model="model", backend="vllm", log=messages.append)
+
+        with patch("zeno.vllm_family.shutil.which", return_value="/usr/bin/vllm"):
+            manager._require_command("vllm")
+
+        self.assertEqual(messages, ["found backend command: vllm"])
+
+    def test_startup_failure_includes_backend_log_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = VllmFamilyManager(model="model", backend="vllm", log_dir=Path(tmpdir))
+            log_path = manager._backend_log_path()
+            log_path.write_text("line one\nline two\n")
+
+            message = manager._startup_failure_message("vllm service did not become ready")
+
+        self.assertIn("vllm service did not become ready", message)
+        self.assertIn("See backend log:", message)
+        self.assertIn("line one", message)
+        self.assertIn("line two", message)
+
+    def test_wait_until_running_reports_process_exit(self) -> None:
+        class ExitedProcess:
+            returncode = 7
+
+            def poll(self) -> int:
+                return 7
+
+        class NeverReadyManager(VllmFamilyManager):
+            def _is_running(self) -> bool:
+                return False
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = NeverReadyManager(model="model", backend="vllm", startup_timeout=0.1, log_dir=Path(tmpdir))
+            manager._backend_log_path().write_text("backend crashed\n")
+
+            with self.assertRaisesRegex(RuntimeError, "exited with code 7") as raised:
+                manager._wait_until_running(ExitedProcess())
+
+        self.assertIn("backend crashed", str(raised.exception))
 
 
 class FakeOllamaManager(OllamaManager):
