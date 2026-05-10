@@ -1,3 +1,4 @@
+from .config import ConfigStore
 from .core import Agent, default_local_model, default_model_name, ensure_default_local_model, tool_schema
 from .models import DEFAULT_MLX_MODEL, MLXChatModel, OllamaChatModel, OpenAICompatibleChatModel
 from .ollama import OllamaManager
@@ -12,6 +13,7 @@ __all__ = [
     "ChatModel",
     "ChatResponse",
     "ChatSession",
+    "ConfigStore",
     "Message",
     "MLXChatModel",
     "OllamaChatModel",

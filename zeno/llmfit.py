@@ -20,7 +20,7 @@ def recommend_model(backend: str, use_case: str = "coding", log: VerboseLogger |
             log("llmfit not found; using built-in default model")
         return None
     runtime = "mlx" if backend == "vllm-mlx" else "vllm"
-    command = ["llmfit", "recommend", "--json", "--limit", "1", "--use-case", use_case, "--force-runtime", runtime]
+    command = _recommend_command(runtime, use_case, 1)
     if log is not None:
         log(f"running model recommendation: {' '.join(command)}")
     try:
@@ -44,17 +44,51 @@ def recommend_model(backend: str, use_case: str = "coding", log: VerboseLogger |
     return LlmfitRecommendation(model=model, source="llmfit")
 
 
+def recommend_models(backend: str, limit: int = 5, use_case: str = "coding", log: VerboseLogger | None = None) -> list[LlmfitRecommendation]:
+    if shutil.which("llmfit") is None:
+        if log is not None:
+            log("llmfit not found; no model recommendations available")
+        return []
+    runtime = "mlx" if backend == "vllm-mlx" else "vllm"
+    command = _recommend_command(runtime, use_case, limit)
+    if log is not None:
+        log(f"running model recommendations: {' '.join(command)}")
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+    except OSError as exc:
+        if log is not None:
+            log(f"llmfit failed to start: {exc}")
+        return []
+    except subprocess.CalledProcessError as exc:
+        if log is not None:
+            detail = exc.stderr.strip() if exc.stderr else str(exc)
+            log(f"llmfit recommendations failed: {detail}")
+        return []
+    models = parse_recommended_models(result.stdout)
+    return [LlmfitRecommendation(model=model, source="llmfit") for model in models]
+
+
 def parse_recommended_model(text: str) -> str | None:
+    models = parse_recommended_models(text)
+    return models[0] if models else None
+
+
+def parse_recommended_models(text: str) -> list[str]:
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        return None
+        return []
     candidates = data if isinstance(data, list) else _candidate_lists(data)
+    models: list[str] = []
     for candidate in candidates:
         model = _model_from_candidate(candidate)
-        if model:
-            return model
-    return None
+        if model and model not in models:
+            models.append(model)
+    return models
+
+
+def _recommend_command(runtime: str, use_case: str, limit: int) -> list[str]:
+    return ["llmfit", "recommend", "--json", "--limit", str(limit), "--use-case", use_case, "--force-runtime", runtime]
 
 
 def _candidate_lists(data: object) -> list[object]:

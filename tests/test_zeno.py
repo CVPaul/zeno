@@ -8,10 +8,10 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from zeno import Agent, ChatResponse, DEFAULT_VLLM_MODEL, MLXChatModel, Message, OllamaChatModel, OllamaManager, OpenAICompatibleChatModel, SessionStore, ToolCall, VllmFamilyManager, default_backend, default_local_model, default_model_name, tool_schema
+from zeno import Agent, ChatResponse, ConfigStore, DEFAULT_VLLM_MODEL, MLXChatModel, Message, OllamaChatModel, OllamaManager, OpenAICompatibleChatModel, SessionStore, ToolCall, VllmFamilyManager, default_backend, default_local_model, default_model_name, tool_schema
 from zeno.models import _parse_tool_calls, MLXChatModel as ConcreteMLXChatModel
 from zeno.cli import main as cli_main
-from zeno.llmfit import LlmfitRecommendation, parse_recommended_model, recommend_model
+from zeno.llmfit import LlmfitRecommendation, parse_recommended_model, parse_recommended_models, recommend_model
 from zeno.sessions import default_session_dir
 
 
@@ -148,10 +148,11 @@ class CliTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             store = SessionStore(Path(tmpdir))
+            config = ConfigStore(Path(tmpdir) / "config.json")
             fake_model = FakeModel([ChatResponse("ready", [])])
             with patch("zeno.cli.ensure_default_local_model", return_value=fake_model) as ensure_model:
                 with patch("builtins.input", side_effect=["hello", "quit"]), redirect_stdout(stdout):
-                    exit_code = cli_main([], store=store)
+                    exit_code = cli_main([], store=store, config=config)
 
         self.assertEqual(exit_code, 0)
         ensure_model.assert_called_once_with(None, None)
@@ -340,9 +341,11 @@ class CliTests(unittest.TestCase):
         fake_model = FakeModel([])
         fake_model.model = "Qwen/Qwen2.5-7B-Instruct"
 
-        with patch("zeno.cli.ensure_default_local_model", return_value=fake_model) as ensure_model:
-            with redirect_stdout(stdout):
-                exit_code = cli_main(["--backend", "vllm", "serve"])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ConfigStore(Path(tmpdir) / "config.json")
+            with patch("zeno.cli.ensure_default_local_model", return_value=fake_model) as ensure_model:
+                with redirect_stdout(stdout):
+                    exit_code = cli_main(["--backend", "vllm", "serve"], config=config)
 
         self.assertEqual(exit_code, 0)
         ensure_model.assert_called_once_with(None, "vllm")
@@ -352,12 +355,110 @@ class CliTests(unittest.TestCase):
         fake_model = FakeModel([])
         fake_model.model = "Qwen/Qwen2.5-7B-Instruct"
 
-        with patch("zeno.cli.ensure_default_local_model", return_value=fake_model) as ensure_model:
-            with redirect_stdout(io.StringIO()):
-                exit_code = cli_main(["--backend", "vllm", "--device", "cpu", "serve"])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ConfigStore(Path(tmpdir) / "config.json")
+            with patch("zeno.cli.ensure_default_local_model", return_value=fake_model) as ensure_model:
+                with redirect_stdout(io.StringIO()):
+                    exit_code = cli_main(["--backend", "vllm", "--device", "cpu", "serve"], config=config)
 
         self.assertEqual(exit_code, 0)
         ensure_model.assert_called_once_with(None, "vllm", device="cpu")
+
+    def test_cli_startup_timeout_option_passes_backend_timeout(self) -> None:
+        fake_model = FakeModel([])
+        fake_model.model = "Qwen/Qwen2.5-7B-Instruct"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ConfigStore(Path(tmpdir) / "config.json")
+            with patch("zeno.cli.ensure_default_local_model", return_value=fake_model) as ensure_model:
+                with redirect_stdout(io.StringIO()):
+                    exit_code = cli_main(["--backend", "vllm", "--startup-timeout", "3600", "serve"], config=config)
+
+        self.assertEqual(exit_code, 0)
+        ensure_model.assert_called_once_with(None, "vllm", startup_timeout=3600.0)
+
+    def test_cli_models_lists_llmfit_candidates(self) -> None:
+        stdout = io.StringIO()
+        recommendations = [
+            LlmfitRecommendation(model="Qwen/Qwen3-Coder-30B-A3B-Instruct", source="llmfit"),
+            LlmfitRecommendation(model="mlx-community/Qwen2.5-14B-Instruct-4bit", source="llmfit"),
+        ]
+
+        with patch("zeno.cli.recommend_models", return_value=recommendations) as recommend:
+            with redirect_stdout(stdout):
+                exit_code = cli_main(["--backend", "vllm-mlx", "models", "--limit", "2"])
+
+        self.assertEqual(exit_code, 0)
+        recommend.assert_called_once_with("vllm-mlx", limit=2, log=None)
+        self.assertIn("Qwen/Qwen3-Coder-30B-A3B-Instruct", stdout.getvalue())
+        self.assertIn("zeno --model <MODEL>", stdout.getvalue())
+
+    def test_cli_select_model_uses_candidate_choice(self) -> None:
+        fake_model = FakeModel([])
+        fake_model.model = "mlx-community/Qwen2.5-14B-Instruct-4bit"
+        recommendations = [
+            LlmfitRecommendation(model="Qwen/Qwen3-Coder-30B-A3B-Instruct", source="llmfit"),
+            LlmfitRecommendation(model="mlx-community/Qwen2.5-14B-Instruct-4bit", source="llmfit"),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ConfigStore(Path(tmpdir) / "config.json")
+            with patch("zeno.cli.recommend_models", return_value=recommendations):
+                with patch("zeno.cli.ensure_default_local_model", return_value=fake_model) as ensure_model:
+                    with patch("builtins.input", return_value="2"), redirect_stdout(io.StringIO()):
+                        exit_code = cli_main(["--backend", "vllm-mlx", "--select-model", "serve"], config=config)
+            saved_model = config.model_for_backend("vllm-mlx")
+
+        self.assertEqual(exit_code, 0)
+        ensure_model.assert_called_once_with("mlx-community/Qwen2.5-14B-Instruct-4bit", "vllm-mlx")
+        self.assertEqual(saved_model, "mlx-community/Qwen2.5-14B-Instruct-4bit")
+
+    def test_cli_select_model_accepts_custom_model(self) -> None:
+        fake_model = FakeModel([])
+        fake_model.model = "custom/model"
+        recommendations = [LlmfitRecommendation(model="Qwen/Qwen3-Coder-30B-A3B-Instruct", source="llmfit")]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ConfigStore(Path(tmpdir) / "config.json")
+            with patch("zeno.cli.recommend_models", return_value=recommendations):
+                with patch("zeno.cli.ensure_default_local_model", return_value=fake_model) as ensure_model:
+                    with patch("builtins.input", return_value="custom/model"), redirect_stdout(io.StringIO()):
+                        exit_code = cli_main(["--backend", "vllm-mlx", "--select-model", "serve"], config=config)
+            saved_model = config.model_for_backend("vllm-mlx")
+
+        self.assertEqual(exit_code, 0)
+        ensure_model.assert_called_once_with("custom/model", "vllm-mlx")
+        self.assertEqual(saved_model, "custom/model")
+
+    def test_cli_reuses_saved_model_before_llmfit(self) -> None:
+        fake_model = FakeModel([])
+        fake_model.model = "saved/model"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ConfigStore(Path(tmpdir) / "config.json")
+            config.save_model("vllm-mlx", "saved/model")
+            with patch("zeno.cli.recommend_models") as recommend_models_mock:
+                with patch("zeno.cli.ensure_default_local_model", return_value=fake_model) as ensure_model:
+                    with redirect_stdout(io.StringIO()):
+                        exit_code = cli_main(["--backend", "vllm-mlx", "serve"], config=config)
+
+        self.assertEqual(exit_code, 0)
+        recommend_models_mock.assert_not_called()
+        ensure_model.assert_called_once_with("saved/model", "vllm-mlx")
+
+    def test_cli_model_option_saves_explicit_choice(self) -> None:
+        fake_model = FakeModel([])
+        fake_model.model = "explicit/model"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = ConfigStore(Path(tmpdir) / "config.json")
+            with patch("zeno.cli.ensure_default_local_model", return_value=fake_model):
+                with redirect_stdout(io.StringIO()):
+                    exit_code = cli_main(["--backend", "vllm-mlx", "--model", "explicit/model", "serve"], config=config)
+            saved_model = config.model_for_backend("vllm-mlx")
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(saved_model, "explicit/model")
 
     def test_cli_task_create_error_is_user_facing(self) -> None:
         class BrokenModel:
@@ -471,6 +572,11 @@ class LlmfitTests(unittest.TestCase):
 
         self.assertEqual(parse_recommended_model(text), "mlx-community/Qwen2.5-14B-Instruct-4bit")
 
+    def test_parse_recommended_models_returns_all_candidates(self) -> None:
+        text = '[{"model":"Qwen/A"},{"name":"Qwen/B"},{"model":"Qwen/A"}]'
+
+        self.assertEqual(parse_recommended_models(text), ["Qwen/A", "Qwen/B"])
+
     def test_parse_recommended_model_returns_none_for_invalid_json(self) -> None:
         self.assertIsNone(parse_recommended_model("not json"))
 
@@ -495,6 +601,11 @@ class VllmFamilyManagerTests(unittest.TestCase):
         manager = VllmFamilyManager(model="Qwen/Qwen2.5-0.5B-Instruct", backend="vllm", device="cpu")
 
         self.assertEqual(manager._command(), ["vllm", "serve", "Qwen/Qwen2.5-0.5B-Instruct", "--port", "8000", "--device", "cpu"])
+
+    def test_default_startup_timeout_is_long_enough_for_downloads(self) -> None:
+        manager = VllmFamilyManager(model="model", backend="vllm")
+
+        self.assertGreaterEqual(manager.startup_timeout, 1800.0)
 
     def test_unsupported_backend_raises(self) -> None:
         manager = VllmFamilyManager(model="model", backend="bad")
