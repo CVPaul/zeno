@@ -10,6 +10,7 @@ from .config import ConfigStore
 from .logging import verbose_logger
 from .vllm_family import default_backend
 from .sessions import SessionStore
+from .tools import default_tools
 from .types import Message
 
 
@@ -173,14 +174,14 @@ def main(argv: list[str] | None = None, agent: Agent | None = None, store: Sessi
                 return 1
             try:
                 selected_model = resolve_model_choice(args.model, args.backend, log, config_store)
-                selected_agent = agent or Agent(model=_ensure_model(selected_model, args.backend, log, args.device, args.startup_timeout))
+                selected_agent = agent or default_agent(_ensure_model(selected_model, args.backend, log, args.device, args.startup_timeout))
             except RuntimeError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return 1
             return run_chat(selected_agent, session_store, session_id=session_id)
         try:
             selected_model = resolve_model_choice(args.model, args.backend, log, config_store)
-            selected_agent = agent or Agent(model=_ensure_model(selected_model, args.backend, log, args.device, args.startup_timeout))
+            selected_agent = agent or default_agent(_ensure_model(selected_model, args.backend, log, args.device, args.startup_timeout))
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
@@ -211,6 +212,17 @@ def _ensure_model(model: str | None, backend: str | None, log: object | None, de
     if device is None:
         return ensure_default_local_model(model, backend, log=log, startup_timeout=startup_timeout)
     return ensure_default_local_model(model, backend, log=log, device=device, startup_timeout=startup_timeout)
+
+
+def default_agent(model: object) -> Agent:
+    return Agent(
+        model=model,
+        system=(
+            "You are a helpful, concise local coding agent. "
+            "When the user asks you to implement code or create a file, use the write_file tool instead of only describing the code."
+        ),
+        tools=default_tools(),
+    )
 
 
 def resolve_model_choice(model: str | None, backend: str | None, log: object | None, config: ConfigStore) -> str | None:
