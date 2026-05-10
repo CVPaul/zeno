@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from zeno import Agent, ChatResponse, ConfigStore, DEFAULT_VLLM_MODEL, MLXChatModel, Message, OllamaChatModel, OllamaManager, OpenAICompatibleChatModel, SessionStore, ToolCall, VllmFamilyManager, clean_model_output, default_backend, default_local_model, default_model_name, default_tools, parse_inline_tool_calls, split_model_output, strip_inline_tool_calls, tool_schema
-from zeno.cli import compact_messages, default_agent, main as cli_main, print_thinking, typewriter_print
+from zeno.cli import compact_messages, default_agent, is_exit_prompt, main as cli_main, print_thinking, typewriter_print
 from zeno.models import _parse_tool_calls, MLXChatModel as ConcreteMLXChatModel
 from zeno.sessions import default_session_dir
 
@@ -28,6 +28,29 @@ class FakeModel:
         self.messages.append([message.copy() for message in messages])
         self.tools.append(tools)
         return self.replies.pop(0)
+
+
+class FakeStreamingModel:
+    def __init__(self, chunks: list[str]) -> None:
+        self.chunks = chunks
+        self.messages: list[list[Message]] = []
+        self.tools: list[list[dict[str, object]] | None] = []
+
+    def chat(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, object]] | None = None,
+    ) -> ChatResponse:
+        raise AssertionError("streaming path should not call chat")
+
+    def stream_chat(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, object]] | None = None,
+    ) -> object:
+        self.messages.append([message.copy() for message in messages])
+        self.tools.append(tools)
+        yield from self.chunks
 
 
 class AgentTests(unittest.TestCase):
@@ -117,6 +140,35 @@ class AgentTests(unittest.TestCase):
         self.assertIn("I will write it.", answer)
         self.assertIn("tool write_file completed", answer)
         self.assertIn("mlp_training.py", answer)
+
+    def test_streams_chunks_before_returning_result(self) -> None:
+        seen: list[str] = []
+        agent = Agent(model=FakeStreamingModel(["hel", "lo"]), system="test")
+
+        result = agent.stream_messages_with_result([{"role": "user", "content": "hi"}], on_chunk=seen.append)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(seen, ["hel", "lo"])
+        self.assertEqual(result.answer, "hello")
+        self.assertTrue(result.streamed)
+
+    def test_streaming_hides_inline_tool_call_and_executes_it(self) -> None:
+        chunks = [
+            "Writing\n<|tool_",
+            "call>call:write_file{path:<|\"|>mlp.py<|\"|>,content:<|\"|>print(1)\n<|\"|>}<tool_",
+            "call|>",
+        ]
+        seen: list[str] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = Agent(model=FakeStreamingModel(chunks), tools=default_tools(Path(tmpdir)))
+            result = agent.stream_messages_with_result([{"role": "user", "content": "write"}], on_chunk=seen.append)
+            created = Path(tmpdir) / "mlp.py"
+
+            self.assertEqual(created.read_text(encoding="utf-8"), "print(1)\n")
+
+        self.assertIsNotNone(result)
+        self.assertEqual("".join(seen), "Writing\ntool write_file completed: {\"path\": \"mlp.py\", \"bytes\": 9}")
+        self.assertEqual(result.answer, "Writing\ntool write_file completed: {\"path\": \"mlp.py\", \"bytes\": 9}")
 
     def test_tool_schema_uses_function_signature(self) -> None:
         def add(a: int, b: int) -> int:
@@ -234,6 +286,21 @@ class CliTests(unittest.TestCase):
         self.assertEqual(sessions[0].message_count, 2)
         self.assertEqual(sessions[0].title, "hello")
         self.assertIn("offline answer", stdout.getvalue())
+
+    def test_cli_exit_function_prompt_exits_without_model_call(self) -> None:
+        agent = Agent(model=FakeModel([]))
+        stdout = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SessionStore(Path(tmpdir))
+            with patch("builtins.input", side_effect=["exit()"]), redirect_stdout(stdout):
+                exit_code = cli_main([], agent=agent, store=store)
+            sessions = store.list()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0].message_count, 0)
+        self.assertTrue(is_exit_prompt("quit()"))
 
     def test_cli_shows_thinking_but_saves_clean_answer(self) -> None:
         raw = '<|channel>thought\nWorking through it.\n<channel|>Final answer.'
