@@ -11,7 +11,6 @@ from unittest.mock import patch
 from zeno import Agent, ChatResponse, ConfigStore, DEFAULT_VLLM_MODEL, MLXChatModel, Message, OllamaChatModel, OllamaManager, OpenAICompatibleChatModel, SessionStore, ToolCall, VllmFamilyManager, default_backend, default_local_model, default_model_name, tool_schema
 from zeno.models import _parse_tool_calls, MLXChatModel as ConcreteMLXChatModel
 from zeno.cli import main as cli_main
-from zeno.llmfit import LlmfitRecommendation, parse_recommended_model, parse_recommended_models, recommend_model
 from zeno.sessions import default_session_dir
 
 
@@ -130,18 +129,11 @@ class CliTests(unittest.TestCase):
         self.assertIsInstance(default_local_model(), OpenAICompatibleChatModel)
 
     def test_default_model_is_vllm_family_model(self) -> None:
-        with patch("zeno.vllm_family.recommend_model", return_value=None):
-            self.assertEqual(default_backend(), "vllm")
-            self.assertEqual(default_model_name(), DEFAULT_VLLM_MODEL)
-            self.assertEqual(default_local_model().model, DEFAULT_VLLM_MODEL)
-            self.assertEqual(default_model_name("Qwen/Qwen2.5-14B-Instruct"), "Qwen/Qwen2.5-14B-Instruct")
-            self.assertEqual(default_local_model("Qwen/Qwen2.5-14B-Instruct").model, "Qwen/Qwen2.5-14B-Instruct")
-
-    def test_default_model_uses_llmfit_recommendation_when_available(self) -> None:
-        recommendation = LlmfitRecommendation(model="Qwen/Qwen2.5-14B-Instruct", source="llmfit")
-
-        with patch("zeno.vllm_family.recommend_model", return_value=recommendation):
-            self.assertEqual(default_model_name(backend="vllm"), "Qwen/Qwen2.5-14B-Instruct")
+        self.assertEqual(default_backend(), "vllm")
+        self.assertEqual(default_model_name(), DEFAULT_VLLM_MODEL)
+        self.assertEqual(default_local_model().model, DEFAULT_VLLM_MODEL)
+        self.assertEqual(default_model_name("Qwen/Qwen2.5-14B-Instruct"), "Qwen/Qwen2.5-14B-Instruct")
+        self.assertEqual(default_local_model("Qwen/Qwen2.5-14B-Instruct").model, "Qwen/Qwen2.5-14B-Instruct")
 
     def test_cli_without_injected_agent_ensures_ollama_before_chat(self) -> None:
         stdout = io.StringIO()
@@ -377,73 +369,18 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         ensure_model.assert_called_once_with(None, "vllm", startup_timeout=3600.0)
 
-    def test_cli_models_lists_llmfit_candidates(self) -> None:
-        stdout = io.StringIO()
-        recommendations = [
-            LlmfitRecommendation(model="Qwen/Qwen3-Coder-30B-A3B-Instruct", source="llmfit"),
-            LlmfitRecommendation(model="mlx-community/Qwen2.5-14B-Instruct-4bit", source="llmfit"),
-        ]
-
-        with patch("zeno.cli.recommend_models", return_value=recommendations) as recommend:
-            with redirect_stdout(stdout):
-                exit_code = cli_main(["--backend", "vllm-mlx", "models", "--limit", "2"])
-
-        self.assertEqual(exit_code, 0)
-        recommend.assert_called_once_with("vllm-mlx", limit=2, log=None)
-        self.assertIn("Qwen/Qwen3-Coder-30B-A3B-Instruct", stdout.getvalue())
-        self.assertIn("zeno --model <MODEL>", stdout.getvalue())
-
-    def test_cli_select_model_uses_candidate_choice(self) -> None:
-        fake_model = FakeModel([])
-        fake_model.model = "mlx-community/Qwen2.5-14B-Instruct-4bit"
-        recommendations = [
-            LlmfitRecommendation(model="Qwen/Qwen3-Coder-30B-A3B-Instruct", source="llmfit"),
-            LlmfitRecommendation(model="mlx-community/Qwen2.5-14B-Instruct-4bit", source="llmfit"),
-        ]
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config = ConfigStore(Path(tmpdir) / "config.json")
-            with patch("zeno.cli.recommend_models", return_value=recommendations):
-                with patch("zeno.cli.ensure_default_local_model", return_value=fake_model) as ensure_model:
-                    with patch("builtins.input", return_value="2"), redirect_stdout(io.StringIO()):
-                        exit_code = cli_main(["--backend", "vllm-mlx", "--select-model", "serve"], config=config)
-            saved_model = config.model_for_backend("vllm-mlx")
-
-        self.assertEqual(exit_code, 0)
-        ensure_model.assert_called_once_with("mlx-community/Qwen2.5-14B-Instruct-4bit", "vllm-mlx")
-        self.assertEqual(saved_model, "mlx-community/Qwen2.5-14B-Instruct-4bit")
-
-    def test_cli_select_model_accepts_custom_model(self) -> None:
-        fake_model = FakeModel([])
-        fake_model.model = "custom/model"
-        recommendations = [LlmfitRecommendation(model="Qwen/Qwen3-Coder-30B-A3B-Instruct", source="llmfit")]
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config = ConfigStore(Path(tmpdir) / "config.json")
-            with patch("zeno.cli.recommend_models", return_value=recommendations):
-                with patch("zeno.cli.ensure_default_local_model", return_value=fake_model) as ensure_model:
-                    with patch("builtins.input", return_value="custom/model"), redirect_stdout(io.StringIO()):
-                        exit_code = cli_main(["--backend", "vllm-mlx", "--select-model", "serve"], config=config)
-            saved_model = config.model_for_backend("vllm-mlx")
-
-        self.assertEqual(exit_code, 0)
-        ensure_model.assert_called_once_with("custom/model", "vllm-mlx")
-        self.assertEqual(saved_model, "custom/model")
-
-    def test_cli_reuses_saved_model_before_llmfit(self) -> None:
+    def test_cli_reuses_saved_model_before_builtin_default(self) -> None:
         fake_model = FakeModel([])
         fake_model.model = "saved/model"
 
         with tempfile.TemporaryDirectory() as tmpdir:
             config = ConfigStore(Path(tmpdir) / "config.json")
             config.save_model("vllm-mlx", "saved/model")
-            with patch("zeno.cli.recommend_models") as recommend_models_mock:
-                with patch("zeno.cli.ensure_default_local_model", return_value=fake_model) as ensure_model:
-                    with redirect_stdout(io.StringIO()):
-                        exit_code = cli_main(["--backend", "vllm-mlx", "serve"], config=config)
+            with patch("zeno.cli.ensure_default_local_model", return_value=fake_model) as ensure_model:
+                with redirect_stdout(io.StringIO()):
+                    exit_code = cli_main(["--backend", "vllm-mlx", "serve"], config=config)
 
         self.assertEqual(exit_code, 0)
-        recommend_models_mock.assert_not_called()
         ensure_model.assert_called_once_with("saved/model", "vllm-mlx")
 
     def test_cli_model_option_saves_explicit_choice(self) -> None:
@@ -561,28 +498,6 @@ class OllamaManagerTests(unittest.TestCase):
         manager._pull_model()
 
         self.assertEqual(manager.pull_requests, [("/api/pull", {"name": "qwen3:14b", "stream": False}, None)])
-
-
-class LlmfitTests(unittest.TestCase):
-    def test_parse_recommended_model_from_list(self) -> None:
-        self.assertEqual(parse_recommended_model('[{"model":"Qwen/Qwen2.5-14B-Instruct"}]'), "Qwen/Qwen2.5-14B-Instruct")
-
-    def test_parse_recommended_model_from_wrapped_results(self) -> None:
-        text = '{"recommendations":[{"name":"mlx-community/Qwen2.5-14B-Instruct-4bit"}]}'
-
-        self.assertEqual(parse_recommended_model(text), "mlx-community/Qwen2.5-14B-Instruct-4bit")
-
-    def test_parse_recommended_models_returns_all_candidates(self) -> None:
-        text = '[{"model":"Qwen/A"},{"name":"Qwen/B"},{"model":"Qwen/A"}]'
-
-        self.assertEqual(parse_recommended_models(text), ["Qwen/A", "Qwen/B"])
-
-    def test_parse_recommended_model_returns_none_for_invalid_json(self) -> None:
-        self.assertIsNone(parse_recommended_model("not json"))
-
-    def test_recommend_model_returns_none_when_llmfit_missing(self) -> None:
-        with patch("zeno.llmfit.shutil.which", return_value=None):
-            self.assertIsNone(recommend_model("vllm"))
 
 
 class VllmFamilyManagerTests(unittest.TestCase):
