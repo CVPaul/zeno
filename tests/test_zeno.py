@@ -170,6 +170,39 @@ class AgentTests(unittest.TestCase):
         self.assertEqual("".join(seen), "Writing\ntool write_file completed: {\"path\": \"mlp.py\", \"bytes\": 9}")
         self.assertEqual(result.answer, "Writing\ntool write_file completed: {\"path\": \"mlp.py\", \"bytes\": 9}")
 
+    def test_streaming_inline_tool_call_creates_file_without_duplicate_answer(self) -> None:
+        chunks = [
+            "好的，我将创建文件。\n<|tool_call>",
+            "call:write_file{path:<|\"|>mlp_training.py<|\"|>,content:<|\"|>print('mlp')\n<|\"|>}",
+            "<tool_call|>",
+        ]
+        seen: list[str] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = Agent(model=FakeStreamingModel(chunks), tools=default_tools(Path(tmpdir)))
+
+            result = agent.stream_messages_with_result([{"role": "user", "content": "实现一个mlp训练脚本"}], on_chunk=seen.append)
+
+            self.assertEqual((Path(tmpdir) / "mlp_training.py").read_text(encoding="utf-8"), "print('mlp')\n")
+
+        self.assertIsNotNone(result)
+        shown = "".join(seen)
+        self.assertEqual(shown.count("好的，我将创建文件。"), 1)
+        self.assertIn("tool write_file completed", shown)
+        self.assertEqual(result.answer.count("好的，我将创建文件。"), 1)
+
+    def test_streaming_shows_thinking_channel(self) -> None:
+        chunks = ["<|channel>tho", "ught\nPlan", " step\n<channel|>", "Final"]
+        seen: list[str] = []
+        agent = Agent(model=FakeStreamingModel(chunks), system="test")
+
+        result = agent.stream_messages_with_result([{"role": "user", "content": "hi"}], on_chunk=seen.append)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.thinking, "Plan step")
+        self.assertEqual(result.answer, "Final")
+        self.assertIn("thinking:\n  Plan step\n", "".join(seen))
+        self.assertTrue("".join(seen).endswith("Final"))
+
     def test_tool_schema_uses_function_signature(self) -> None:
         def add(a: int, b: int) -> int:
             """Add two integers."""
@@ -531,6 +564,15 @@ class CliTests(unittest.TestCase):
         self.assertEqual(content, "print('mlp')\n")
         self.assertIn("Created train_mlp.py", stdout.getvalue())
         self.assertIsNotNone(model.tools[0])
+
+    def test_cli_default_agent_prompt_includes_inline_write_file_format(self) -> None:
+        model = FakeModel([ChatResponse("done", [])])
+
+        agent = default_agent(model)
+
+        self.assertIn("call write_file", agent.system)
+        self.assertIn("<|tool_call>call:write_file", agent.system)
+        self.assertIn("Do not say you created a file unless you called write_file", agent.system)
 
     def test_cli_serve_starts_backend_without_chat(self) -> None:
         stdout = io.StringIO()

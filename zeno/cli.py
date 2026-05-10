@@ -235,7 +235,10 @@ def default_agent(model: object) -> Agent:
         model=model,
         system=(
             "You are a helpful, concise local coding agent. "
-            "When the user asks you to implement code or create a file, use the write_file tool instead of only describing the code."
+            "When the user asks you to implement code or create a file, call write_file instead of only describing the code. "
+            "If native tool calls are unavailable, emit exactly this inline tool-call format: "
+            "<|tool_call>call:write_file{path:<|\"|>relative/path.py<|\"|>,content:<|\"|>file contents<|\"|>}<tool_call|>. "
+            "Do not say you created a file unless you called write_file."
         ),
         tools=default_tools(),
     )
