@@ -50,6 +50,23 @@ zeno --backend vllm-mlx
 zeno --backend vllm
 ```
 
+Linux 调试 CPU-only 环境时也可以显式指定 vLLM device：
+
+```bash
+zeno --backend vllm --device cpu -v serve
+```
+
+注意：CPU mode 依赖当前 vLLM wheel 是否支持 CPU backend；生产默认仍建议 CUDA/Linux 或 vLLM-MLX/Mac。
+
+第一次运行会下载/加载模型，可能需要等一段时间。需要看卡在哪里时加 `-v`：
+
+```bash
+zeno -v
+zeno -v serve
+```
+
+Verbose 模式会把后端选择、`llmfit` 推荐/回退、启动命令、`/v1/models` readiness 轮询打印到 stderr；后端进程自身输出也会显示出来，方便判断是在下载模型、编译 kernel，还是服务没有启动成功。
+
 ## 任务命令
 
 只启动本地模型服务：
