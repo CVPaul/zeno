@@ -40,6 +40,7 @@ class _StreamDisplayFilter:
         self._inside_tool_call = False
         self._inside_thought = False
         self._thought_end = ""
+        self._thought_buffer = ""
         self.displayed_answer = ""
 
     def feed(self, chunk: str) -> str:
@@ -60,16 +61,18 @@ class _StreamDisplayFilter:
                 end = self._buffer.find(self._thought_end)
                 if end == -1:
                     keep = self._pending_prefix_len((self._thought_end,))
-                    if len(self._buffer) <= keep:
+                    if keep and len(self._buffer) <= keep:
                         break
-                    output.append(self._format_thinking(self._buffer[:-keep]))
+                    thinking = self._buffer[:-keep] if keep else self._buffer
+                    self._thought_buffer += thinking
                     self._buffer = self._buffer[-keep:] if keep else ""
                     break
-                output.append(self._format_thinking(self._buffer[:end]))
-                output.append("\n")
+                self._thought_buffer += self._buffer[:end]
+                output.append(self._format_thinking_block(self._thought_buffer))
                 self._buffer = self._buffer[end + len(self._thought_end) :]
                 self._inside_thought = False
                 self._thought_end = ""
+                self._thought_buffer = ""
                 continue
 
             start = self._buffer.find(_INLINE_TOOL_START)
@@ -87,7 +90,7 @@ class _StreamDisplayFilter:
                 if kind == "tool":
                     self._inside_tool_call = True
                 else:
-                    output.append("thinking:\n  ")
+                    output.append("thinking:\n")
                     self._inside_thought = True
                     self._thought_end = kind
                 continue
@@ -107,7 +110,7 @@ class _StreamDisplayFilter:
         if self._inside_tool_call:
             text = ""
         elif self._inside_thought:
-            text = self._format_thinking(self._buffer)
+            text = self._format_thinking_block(self._thought_buffer + self._buffer)
         else:
             text = self._buffer
             self.displayed_answer += text
@@ -122,8 +125,11 @@ class _StreamDisplayFilter:
         ]
         return min(matches, key=lambda item: item[0]) if matches else (-1, "", "")
 
-    def _format_thinking(self, text: str) -> str:
-        return text.replace("\n", "\n  ")
+    def _format_thinking_block(self, text: str) -> str:
+        thinking = text.strip()
+        if not thinking:
+            return ""
+        return "".join(f"  {line}\n" for line in thinking.splitlines())
 
     def _pending_prefix_len(self, markers: tuple[str, ...]) -> int:
         pending = 0
