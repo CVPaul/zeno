@@ -15,6 +15,7 @@ from .logging import VerboseLogger
 
 DEFAULT_MLX_MODEL = "mlx-community/Qwen2.5-7B-Instruct-4bit"
 DEFAULT_VLLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+DEFAULT_STARTUP_TIMEOUT = 1800.0
 
 
 def default_backend() -> str:
@@ -46,7 +47,7 @@ class VllmFamilyManager:
     model: str
     backend: str
     base_url: str = "http://localhost:8000"
-    startup_timeout: float = 120.0
+    startup_timeout: float = DEFAULT_STARTUP_TIMEOUT
     log: VerboseLogger | None = None
     log_dir: Path | None = None
     device: str | None = None

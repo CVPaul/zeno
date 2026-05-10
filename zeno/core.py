@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from .logging import VerboseLogger
 from .models import OpenAICompatibleChatModel
 from .types import ChatModel, Message, Tool, ToolCall
-from .vllm_family import VllmFamilyManager, default_backend, default_model_name as platform_default_model_name
+from .vllm_family import DEFAULT_STARTUP_TIMEOUT, VllmFamilyManager, default_backend, default_model_name as platform_default_model_name
 
 
 def _json_type(annotation: object) -> str:
@@ -117,6 +117,7 @@ def default_local_model(
     backend: str | None = None,
     log: VerboseLogger | None = None,
     device: str | None = None,
+    startup_timeout: float | None = None,
 ) -> OpenAICompatibleChatModel:
     selected_backend = backend or os.environ.get("ZENO_BACKEND") or default_backend()
     if log is not None:
@@ -130,6 +131,7 @@ def ensure_default_local_model(
     backend: str | None = None,
     log: VerboseLogger | None = None,
     device: str | None = None,
+    startup_timeout: float | None = None,
 ) -> OpenAICompatibleChatModel:
     selected_backend = backend or os.environ.get("ZENO_BACKEND") or default_backend()
     if log is not None:
@@ -138,8 +140,27 @@ def ensure_default_local_model(
     selected_device = device or os.environ.get("ZENO_DEVICE")
     if log is not None and selected_device is not None:
         log(f"selected device override: {selected_device}")
-    manager = VllmFamilyManager(model=selected_model, backend=selected_backend, log=log, device=selected_device)
+    selected_timeout = startup_timeout or _float_env("ZENO_STARTUP_TIMEOUT")
+    if log is not None and selected_timeout is not None:
+        log(f"selected startup timeout: {selected_timeout:.0f}s")
+    manager = VllmFamilyManager(
+        model=selected_model,
+        backend=selected_backend,
+        log=log,
+        device=selected_device,
+        startup_timeout=selected_timeout if selected_timeout is not None else DEFAULT_STARTUP_TIMEOUT,
+    )
     manager.ensure_ready()
     if log is not None:
         log(f"using OpenAI-compatible endpoint: {manager.openai_base_url()}")
     return OpenAICompatibleChatModel(model=selected_model, base_url=manager.openai_base_url())
+
+
+def _float_env(name: str) -> float | None:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return None
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a number of seconds") from exc
