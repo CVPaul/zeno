@@ -8,9 +8,9 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from zeno import Agent, ChatResponse, ConfigStore, DEFAULT_VLLM_MODEL, MLXChatModel, Message, OllamaChatModel, OllamaManager, OpenAICompatibleChatModel, SessionStore, ToolCall, VllmFamilyManager, default_backend, default_local_model, default_model_name, tool_schema
+from zeno import Agent, ChatResponse, ConfigStore, DEFAULT_VLLM_MODEL, MLXChatModel, Message, OllamaChatModel, OllamaManager, OpenAICompatibleChatModel, SessionStore, ToolCall, VllmFamilyManager, clean_model_output, default_backend, default_local_model, default_model_name, split_model_output, tool_schema
+from zeno.cli import compact_messages, main as cli_main, typewriter_print
 from zeno.models import _parse_tool_calls, MLXChatModel as ConcreteMLXChatModel
-from zeno.cli import main as cli_main
 from zeno.sessions import default_session_dir
 
 
@@ -35,6 +35,21 @@ class AgentTests(unittest.TestCase):
         agent = Agent(model=FakeModel([ChatResponse("hello", [])]), system="test")
 
         self.assertEqual(agent.run("hi"), "hello")
+
+    def test_strips_gemma_thought_channel(self) -> None:
+        raw = '<|channel>thought\nThe user greeted us.\n<channel|>Hello!'
+        agent = Agent(model=FakeModel([ChatResponse(raw, [])]), system="test")
+
+        self.assertEqual(agent.run("hi"), "Hello!")
+
+    def test_splits_gemma_thinking_from_answer(self) -> None:
+        result = split_model_output('<|channel>thought\nThe user greeted us.\n<channel|>Hello!')
+
+        self.assertEqual(result.thinking, "The user greeted us.")
+        self.assertEqual(result.answer, "Hello!")
+
+    def test_strips_xml_think_block(self) -> None:
+        self.assertEqual(clean_model_output("<think>hidden</think>Visible"), "Visible")
 
     def test_executes_native_tool_call_then_returns_final_reply(self) -> None:
         model = FakeModel(
@@ -180,6 +195,53 @@ class CliTests(unittest.TestCase):
         self.assertEqual(sessions[0].message_count, 2)
         self.assertEqual(sessions[0].title, "hello")
         self.assertIn("offline answer", stdout.getvalue())
+
+    def test_cli_shows_thinking_but_saves_clean_answer(self) -> None:
+        raw = '<|channel>thought\nWorking through it.\n<channel|>Final answer.'
+        agent = Agent(model=FakeModel([ChatResponse(raw, [])]))
+        stdout = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SessionStore(Path(tmpdir))
+            with patch("builtins.input", side_effect=["hello", "quit"]), redirect_stdout(stdout):
+                exit_code = cli_main([], agent=agent, store=store)
+            session_id = store.latest_id()
+            self.assertIsNotNone(session_id)
+            messages = store.messages(session_id or "")
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("thinking:", stdout.getvalue())
+        self.assertIn("Working through it.", stdout.getvalue())
+        self.assertIn("Final answer.", stdout.getvalue())
+        self.assertEqual(messages[-1]["content"], "Final answer.")
+        self.assertNotIn("Working through it.", messages[-1]["content"])
+
+    def test_typewriter_print_writes_character_by_character(self) -> None:
+        writes: list[str] = []
+        flushes = 0
+
+        def flush() -> None:
+            nonlocal flushes
+            flushes += 1
+
+        typewriter_print("abc", delay=0, write=writes.append, flush=flush)
+
+        self.assertEqual(writes, ["a", "b", "c", "\n"])
+        self.assertEqual(flushes, 4)
+
+    def test_compact_messages_summarizes_old_history(self) -> None:
+        messages = []
+        for index in range(26):
+            role = "user" if index % 2 == 0 else "assistant"
+            messages.append({"role": role, "content": f"message {index}"})
+
+        compacted = compact_messages(messages)
+
+        self.assertEqual(len(compacted), 13)
+        self.assertEqual(compacted[0]["role"], "assistant")
+        self.assertIn("Earlier conversation summary", compacted[0]["content"])
+        self.assertIn("message 0", compacted[0]["content"])
+        self.assertEqual(compacted[1:], messages[-12:])
 
     def test_cli_help_exits_cleanly(self) -> None:
         stdout = io.StringIO()
@@ -467,6 +529,28 @@ class CliTests(unittest.TestCase):
         ])
         self.assertIn(f"zeno task: {session_id}", stdout.getvalue())
         self.assertIn("continued", stdout.getvalue())
+
+    def test_cli_compacts_long_session_history(self) -> None:
+        model = FakeModel([ChatResponse("compacted", [])])
+        agent = Agent(model=model, system="system prompt")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = SessionStore(Path(tmpdir))
+            session_id = store.create()
+            for index in range(26):
+                role = "user" if index % 2 == 0 else "assistant"
+                store.append(session_id, role, f"message {index}")
+
+            with patch("builtins.input", side_effect=["follow up", "quit"]), redirect_stdout(io.StringIO()):
+                exit_code = cli_main(["--continue"], agent=agent, store=store)
+
+        self.assertEqual(exit_code, 0)
+        sent = model.messages[0]
+        self.assertEqual(sent[0], {"role": "system", "content": "system prompt"})
+        self.assertEqual(sent[1]["role"], "assistant")
+        self.assertIn("Earlier conversation summary", sent[1]["content"])
+        self.assertEqual(sent[-1], {"role": "user", "content": "follow up"})
+        self.assertLess(len(sent), 30)
 
 
 class OllamaManagerTests(unittest.TestCase):
