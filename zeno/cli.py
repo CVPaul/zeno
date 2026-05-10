@@ -50,7 +50,7 @@ def run_chat(agent: Agent, store: SessionStore | None = None, session_id: str | 
             prompt = input("zeno> ").strip()
         except EOFError:
             break
-        if prompt in {"", "exit", "quit"}:
+        if is_exit_prompt(prompt):
             break
         session_store.append(session_id, "user", prompt)
         try:
@@ -76,6 +76,10 @@ def list_tasks(store: SessionStore | None = None) -> int:
     return 0
 
 
+def is_exit_prompt(prompt: str) -> bool:
+    return prompt.strip().lower() in {"", "exit", "exit()", "quit", "quit()"}
+
+
 def run_task(description: str, agent: Agent, store: SessionStore | None = None) -> int:
     session_store = store or SessionStore()
     session_id = session_store.create()
@@ -98,13 +102,26 @@ def run_with_session_history(agent: Agent, store: SessionStore, session_id: str)
         content = message.get("content")
         if role in {"user", "assistant"} and isinstance(content, str):
             messages.append({"role": role, "content": content})
+    streaming_result = agent.stream_messages_with_result(messages, on_chunk=stream_chunk)
+    if streaming_result is not None:
+        return streaming_result
     return agent.run_messages_with_result(messages)
 
 
 def print_agent_result(result: AgentResult) -> None:
+    if result.streamed:
+        if result.answer:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        return
     if result.thinking:
         print_thinking(result.thinking)
     typewriter_print(result.answer)
+
+
+def stream_chunk(chunk: str) -> None:
+    sys.stdout.write(chunk)
+    sys.stdout.flush()
 
 
 def print_thinking(thinking: str) -> None:
