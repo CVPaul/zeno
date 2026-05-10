@@ -108,10 +108,9 @@ def print_agent_result(result: AgentResult) -> None:
 
 
 def print_thinking(thinking: str) -> None:
-    print("thinking:")
-    for line in thinking.strip().splitlines():
-        print(f"  {line}")
-    print()
+    lines = ["thinking:"]
+    lines.extend(f"  {line}" for line in thinking.strip().splitlines())
+    typewriter_print("\n".join(lines), delay=TYPEWRITER_DELAY)
 
 
 def compact_messages(messages: list[dict[str, object]]) -> list[dict[str, object]]:

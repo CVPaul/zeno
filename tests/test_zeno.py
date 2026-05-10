@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from zeno import Agent, ChatResponse, ConfigStore, DEFAULT_VLLM_MODEL, MLXChatModel, Message, OllamaChatModel, OllamaManager, OpenAICompatibleChatModel, SessionStore, ToolCall, VllmFamilyManager, clean_model_output, default_backend, default_local_model, default_model_name, default_tools, split_model_output, tool_schema
-from zeno.cli import compact_messages, default_agent, main as cli_main, typewriter_print
+from zeno.cli import compact_messages, default_agent, main as cli_main, print_thinking, typewriter_print
 from zeno.models import _parse_tool_calls, MLXChatModel as ConcreteMLXChatModel
 from zeno.sessions import default_session_dir
 
@@ -244,6 +244,16 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(writes, ["a", "b", "c", "\n"])
         self.assertEqual(flushes, 4)
+
+    def test_print_thinking_uses_typewriter_output(self) -> None:
+        writes: list[str] = []
+
+        with patch("zeno.cli.time.sleep") as sleep:
+            with patch("zeno.cli.sys.stdout.write", side_effect=writes.append), patch("zeno.cli.sys.stdout.flush"):
+                print_thinking("step one")
+
+        self.assertEqual("".join(writes), "thinking:\n  step one\n")
+        self.assertGreater(sleep.call_count, 0)
 
     def test_compact_messages_summarizes_old_history(self) -> None:
         messages = []
