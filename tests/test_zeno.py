@@ -8,7 +8,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from zeno import Agent, ChatResponse, ConfigStore, DEFAULT_VLLM_MODEL, MLXChatModel, Message, OllamaChatModel, OllamaManager, OpenAICompatibleChatModel, SessionStore, ToolCall, VllmFamilyManager, clean_model_output, default_backend, default_local_model, default_model_name, default_tools, split_model_output, tool_schema
+from zeno import Agent, ChatResponse, ConfigStore, DEFAULT_VLLM_MODEL, MLXChatModel, Message, OllamaChatModel, OllamaManager, OpenAICompatibleChatModel, SessionStore, ToolCall, VllmFamilyManager, clean_model_output, default_backend, default_local_model, default_model_name, default_tools, parse_inline_tool_calls, split_model_output, strip_inline_tool_calls, tool_schema
 from zeno.cli import compact_messages, default_agent, main as cli_main, print_thinking, typewriter_print
 from zeno.models import _parse_tool_calls, MLXChatModel as ConcreteMLXChatModel
 from zeno.sessions import default_session_dir
@@ -94,6 +94,29 @@ class AgentTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RuntimeError, "inside the workspace"):
                 tools["write_file"]("../outside.py", "bad")
+
+    def test_parses_gemma_inline_tool_call(self) -> None:
+        raw = 'I will write it.\n<|tool_call>call:write_file{content:<|"|>print("hi")\n<|"|>,path:<|"|>mlp_training.py<|"|>}<tool_call|>'
+
+        calls = parse_inline_tool_calls(raw)
+
+        self.assertEqual(calls, [ToolCall(name="write_file", arguments={"content": 'print("hi")\n', "path": "mlp_training.py"})])
+        self.assertEqual(strip_inline_tool_calls(raw), "I will write it.")
+
+    def test_executes_gemma_inline_write_file_tool(self) -> None:
+        raw = 'I will write it.\n<|tool_call>call:write_file{content:<|"|>print("mlp")\n<|"|>,path:<|"|>mlp_training.py<|"|>}<tool_call|>'
+        model = FakeModel([ChatResponse(raw, [])])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = Agent(model=model, tools=default_tools(Path(tmpdir)))
+            answer = agent.run("implement an mlp trainer")
+            created = Path(tmpdir) / "mlp_training.py"
+
+            self.assertEqual(created.read_text(encoding="utf-8"), 'print("mlp")\n')
+
+        self.assertIn("I will write it.", answer)
+        self.assertIn("tool write_file completed", answer)
+        self.assertIn("mlp_training.py", answer)
 
     def test_tool_schema_uses_function_signature(self) -> None:
         def add(a: int, b: int) -> int:
