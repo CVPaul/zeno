@@ -8,8 +8,8 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from zeno import Agent, ChatResponse, ConfigStore, DEFAULT_VLLM_MODEL, MLXChatModel, Message, OllamaChatModel, OllamaManager, OpenAICompatibleChatModel, SessionStore, ToolCall, VllmFamilyManager, clean_model_output, default_backend, default_local_model, default_model_name, split_model_output, tool_schema
-from zeno.cli import compact_messages, main as cli_main, typewriter_print
+from zeno import Agent, ChatResponse, ConfigStore, DEFAULT_VLLM_MODEL, MLXChatModel, Message, OllamaChatModel, OllamaManager, OpenAICompatibleChatModel, SessionStore, ToolCall, VllmFamilyManager, clean_model_output, default_backend, default_local_model, default_model_name, default_tools, split_model_output, tool_schema
+from zeno.cli import compact_messages, default_agent, main as cli_main, typewriter_print
 from zeno.models import _parse_tool_calls, MLXChatModel as ConcreteMLXChatModel
 from zeno.sessions import default_session_dir
 
@@ -78,6 +78,22 @@ class AgentTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "Unknown tool"):
             agent.run("call")
+
+    def test_default_write_file_tool_creates_workspace_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tools = default_tools(Path(tmpdir))
+            result = tools["write_file"]("scripts/train_mlp.py", "print('train')\n")
+
+            created = Path(tmpdir) / "scripts" / "train_mlp.py"
+            self.assertEqual(created.read_text(encoding="utf-8"), "print('train')\n")
+            self.assertEqual(result["path"], "scripts/train_mlp.py")
+
+    def test_default_write_file_tool_blocks_parent_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tools = default_tools(Path(tmpdir))
+
+            with self.assertRaisesRegex(RuntimeError, "inside the workspace"):
+                tools["write_file"]("../outside.py", "bad")
 
     def test_tool_schema_uses_function_signature(self) -> None:
         def add(a: int, b: int) -> int:
@@ -389,6 +405,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         ensure_model.assert_called_once_with("Qwen/Qwen2.5-14B-Instruct", "vllm")
         self.assertIn("task done", stdout.getvalue())
+
+    def test_cli_default_agent_can_write_files_with_tool_call(self) -> None:
+        model = FakeModel(
+            [
+                ChatResponse("", [ToolCall(name="write_file", arguments={"path": "train_mlp.py", "content": "print('mlp')\n"})]),
+                ChatResponse("Created train_mlp.py", []),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            original_cwd = Path.cwd()
+            os.chdir(tmpdir)
+            try:
+                agent = default_agent(model)
+                stdout = io.StringIO()
+                store = SessionStore(Path(tmpdir) / ".zeno" / "sessions")
+                with redirect_stdout(stdout):
+                    exit_code = cli_main(["task", "create", "write an mlp trainer"], agent=agent, store=store)
+                content = (Path(tmpdir) / "train_mlp.py").read_text(encoding="utf-8")
+            finally:
+                os.chdir(original_cwd)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(content, "print('mlp')\n")
+        self.assertIn("Created train_mlp.py", stdout.getvalue())
+        self.assertIsNotNone(model.tools[0])
 
     def test_cli_serve_starts_backend_without_chat(self) -> None:
         stdout = io.StringIO()
