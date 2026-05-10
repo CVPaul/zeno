@@ -25,6 +25,11 @@ _INLINE_TOOL_START = "<|tool_call>"
 _INLINE_TOOL_END = "<tool_call|>"
 _THOUGHT_STREAM_STARTS = ("<|channel>thought", "<think>")
 _THOUGHT_STREAM_ENDS = ("<channel|>", "</think>")
+_FILE_REQUEST_PATTERN = re.compile(
+    r"(implement|create|write|save|生成|实现|创建|写|保存).*(file|script|代码|文件|脚本)|"
+    r"(file|script|代码|文件|脚本).*(implement|create|write|save|生成|实现|创建|写|保存)",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -41,6 +46,8 @@ class _StreamDisplayFilter:
         self._inside_thought = False
         self._thought_end = ""
         self._thought_buffer = ""
+        self._thought_started = False
+        self._thought_at_line_start = True
         self.displayed_answer = ""
 
     def feed(self, chunk: str) -> str:
@@ -65,14 +72,17 @@ class _StreamDisplayFilter:
                         break
                     thinking = self._buffer[:-keep] if keep else self._buffer
                     self._thought_buffer += thinking
+                    output.append(self._flush_streaming_thinking(final=False))
                     self._buffer = self._buffer[-keep:] if keep else ""
                     break
                 self._thought_buffer += self._buffer[:end]
-                output.append(self._format_thinking_block(self._thought_buffer))
+                output.append(self._flush_streaming_thinking(final=True))
                 self._buffer = self._buffer[end + len(self._thought_end) :]
                 self._inside_thought = False
                 self._thought_end = ""
                 self._thought_buffer = ""
+                self._thought_started = False
+                self._thought_at_line_start = True
                 continue
 
             start = self._buffer.find(_INLINE_TOOL_START)
@@ -93,6 +103,8 @@ class _StreamDisplayFilter:
                     output.append("thinking:\n")
                     self._inside_thought = True
                     self._thought_end = kind
+                    self._thought_started = False
+                    self._thought_at_line_start = True
                 continue
 
             keep = self._pending_prefix_len((_INLINE_TOOL_START, *_THOUGHT_STREAM_STARTS))
@@ -110,7 +122,8 @@ class _StreamDisplayFilter:
         if self._inside_tool_call:
             text = ""
         elif self._inside_thought:
-            text = self._format_thinking_block(self._thought_buffer + self._buffer)
+            self._thought_buffer += self._buffer
+            text = self._flush_streaming_thinking(final=True)
         else:
             text = self._buffer
             self.displayed_answer += text
@@ -130,6 +143,41 @@ class _StreamDisplayFilter:
         if not thinking:
             return ""
         return "".join(f"  {line}\n" for line in thinking.splitlines())
+
+    def _flush_streaming_thinking(self, *, final: bool) -> str:
+        text = self._thought_buffer
+        if not final:
+            text = text.lstrip() if not self._thought_started else text
+            trailing = len(text) - len(text.rstrip())
+            if trailing:
+                self._thought_buffer = text[-trailing:]
+                text = text[:-trailing]
+            else:
+                self._thought_buffer = ""
+            if not text:
+                return ""
+            self._thought_started = True
+            return self._format_streaming_thinking_text(text)
+
+        text = text.strip() if not self._thought_started else text.rstrip()
+        self._thought_buffer = ""
+        if not text:
+            if self._thought_started:
+                return "\n"
+            return ""
+        self._thought_started = True
+        return self._format_streaming_thinking_text(text) + "\n"
+
+    def _format_streaming_thinking_text(self, text: str) -> str:
+        output: list[str] = []
+        for character in text:
+            if self._thought_at_line_start:
+                output.append("  ")
+                self._thought_at_line_start = False
+            output.append(character)
+            if character == "\n":
+                self._thought_at_line_start = True
+        return "".join(output)
 
     def _pending_prefix_len(self, markers: tuple[str, ...]) -> int:
         pending = 0
@@ -258,6 +306,11 @@ class Agent:
                 inline_calls = parse_inline_tool_calls(result.answer)
                 if inline_calls:
                     return AgentResult(answer=self._run_inline_tool_calls(inline_calls, strip_inline_tool_calls(result.answer)), thinking=result.thinking)
+                if self._should_retry_for_write_file(messages):
+                    retry_messages = self._write_file_retry_messages(messages, response.content)
+                    retry_result = self.run_messages_with_result(retry_messages)
+                    thinking = "\n\n".join(part for part in (result.thinking, retry_result.thinking) if part)
+                    return AgentResult(answer=retry_result.answer, thinking=thinking)
                 return result
 
             messages.append(
@@ -302,6 +355,13 @@ class Agent:
             answer = self._run_inline_tool_calls(inline_calls, strip_inline_tool_calls(result.answer))
             self._stream_missing_tail(answer, display_filter.displayed_answer, on_chunk)
             return AgentResult(answer=answer, thinking=result.thinking, streamed=on_chunk is not None)
+        if self._should_retry_for_write_file(messages):
+            retry_messages = self._write_file_retry_messages(messages, content)
+            retry_result = self.run_messages_with_result(retry_messages)
+            thinking = "\n\n".join(part for part in (result.thinking, retry_result.thinking) if part)
+            if on_chunk is not None and retry_result.answer:
+                on_chunk(f"\n{retry_result.answer}")
+            return AgentResult(answer=retry_result.answer, thinking=thinking, streamed=on_chunk is not None)
         answer = result.answer
         self._stream_missing_tail(answer, display_filter.displayed_answer, on_chunk)
         return AgentResult(answer=answer, thinking=result.thinking, streamed=on_chunk is not None)
@@ -339,6 +399,35 @@ class Agent:
             tail = answer
         if tail:
             on_chunk(tail)
+
+    def _should_retry_for_write_file(self, messages: list[Message]) -> bool:
+        if not self.tools or "write_file" not in self.tools:
+            return False
+        for message in reversed(messages):
+            if message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if not isinstance(content, str) or "You did not call write_file" in content:
+                return False
+            return _FILE_REQUEST_PATTERN.search(content) is not None
+        return False
+
+    def _write_file_retry_messages(self, messages: list[Message], response_content: str) -> list[Message]:
+        retry = [message.copy() for message in messages]
+        retry.append({"role": "assistant", "content": response_content})
+        retry.append(
+            {
+                "role": "user",
+                "content": (
+                    "You did not call write_file, so no file was created. "
+                    "Now create the requested file. Return only a write_file tool call, either as native tool_calls "
+                    "or exactly this inline format: "
+                    "<|tool_call>call:write_file{path:<|\"|>relative/path.py<|\"|>,content:<|\"|>file contents<|\"|>}<tool_call|>. "
+                    "Do not explain or include markdown."
+                ),
+            }
+        )
+        return retry
 
     def _tool_call_message(self, call: ToolCall, index: int) -> dict[str, object]:
         return {

@@ -141,6 +141,24 @@ class AgentTests(unittest.TestCase):
         self.assertIn("tool write_file completed", answer)
         self.assertIn("mlp_training.py", answer)
 
+    def test_retries_file_request_when_model_only_describes_code(self) -> None:
+        model = FakeModel(
+            [
+                ChatResponse("You can save this as train_mlp.py.", []),
+                ChatResponse('<|tool_call>call:write_file{path:<|"|>train_mlp.py<|"|>,content:<|"|>print("mlp")\n<|"|>}<tool_call|>', []),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            agent = Agent(model=model, tools=default_tools(Path(tmpdir)))
+            answer = agent.run("实现一个mlp训练脚本")
+
+            self.assertEqual((Path(tmpdir) / "train_mlp.py").read_text(encoding="utf-8"), 'print("mlp")\n')
+
+        self.assertIn("tool write_file completed", answer)
+        self.assertEqual(len(model.messages), 2)
+        self.assertIn("You did not call write_file", model.messages[1][-1]["content"])
+
     def test_streams_chunks_before_returning_result(self) -> None:
         seen: list[str] = []
         agent = Agent(model=FakeStreamingModel(["hel", "lo"]), system="test")
@@ -190,6 +208,30 @@ class AgentTests(unittest.TestCase):
         self.assertIn("tool write_file completed", shown)
         self.assertEqual(result.answer.count("好的，我将创建文件。"), 1)
 
+    def test_streaming_retries_file_request_when_model_only_describes_code(self) -> None:
+        class RecoveringStreamingModel(FakeStreamingModel):
+            def __init__(self) -> None:
+                super().__init__(["你可以将以下代码保存为 train_mlp.py。"])
+
+            def chat(self, messages: list[Message], tools: list[dict[str, object]] | None = None) -> ChatResponse:
+                self.messages.append([message.copy() for message in messages])
+                self.tools.append(tools)
+                return ChatResponse('<|tool_call>call:write_file{path:<|"|>train_mlp.py<|"|>,content:<|"|>print("mlp")\n<|"|>}<tool_call|>', [])
+
+        seen: list[str] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            model = RecoveringStreamingModel()
+            agent = Agent(model=model, tools=default_tools(Path(tmpdir)))
+
+            result = agent.stream_messages_with_result([{"role": "user", "content": "实现一个mlp训练脚本"}], on_chunk=seen.append)
+
+            self.assertEqual((Path(tmpdir) / "train_mlp.py").read_text(encoding="utf-8"), 'print("mlp")\n')
+
+        self.assertIsNotNone(result)
+        self.assertIn("tool write_file completed", result.answer)
+        self.assertIn("tool write_file completed", "".join(seen))
+        self.assertIn("You did not call write_file", model.messages[1][-1]["content"])
+
     def test_streaming_shows_thinking_channel(self) -> None:
         chunks = ["<|channel>tho", "ught\nPlan", " step\n<channel|>", "Final"]
         seen: list[str] = []
@@ -202,6 +244,20 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.answer, "Final")
         self.assertIn("thinking:\n  Plan step\n", "".join(seen))
         self.assertTrue("".join(seen).endswith("Final"))
+
+    def test_streaming_thinking_is_emitted_before_final_answer(self) -> None:
+        chunks = ["<|channel>thought\nPlan", " step", "\n<channel|>Final"]
+        seen: list[str] = []
+        agent = Agent(model=FakeStreamingModel(chunks), system="test")
+
+        result = agent.stream_messages_with_result([{"role": "user", "content": "hi"}], on_chunk=seen.append)
+
+        self.assertIsNotNone(result)
+        shown_before_final = "".join(seen[:-1])
+        self.assertIn("thinking:\n  Plan step\n", "".join(seen))
+        self.assertIn("Plan", shown_before_final)
+        self.assertTrue(seen[-1].endswith("Final"))
+        self.assertEqual(result.thinking, "Plan step")
 
     def test_tool_schema_uses_function_signature(self) -> None:
         def add(a: int, b: int) -> int:
