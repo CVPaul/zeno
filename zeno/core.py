@@ -4,7 +4,7 @@ import inspect
 import json
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
 from .logging import VerboseLogger
@@ -21,12 +21,117 @@ _INLINE_TOOL_CALL_PATTERN = re.compile(r"<\|tool_call>(?P<body>[\s\S]*?)<tool_ca
 _INLINE_TOOL_HEADER_PATTERN = re.compile(r"^call:(?P<name>[A-Za-z_][A-Za-z0-9_]*)\{(?P<arguments>[\s\S]*)\}$")
 _INLINE_STRING_START = '<|"|>'
 _INLINE_STRING_END = '<|"|>'
+_INLINE_TOOL_START = "<|tool_call>"
+_INLINE_TOOL_END = "<tool_call|>"
+_THOUGHT_STREAM_STARTS = ("<|channel>thought", "<think>")
+_THOUGHT_STREAM_ENDS = ("<channel|>", "</think>")
 
 
 @dataclass(frozen=True)
 class AgentResult:
     answer: str
     thinking: str = ""
+    streamed: bool = False
+
+
+class _StreamDisplayFilter:
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._inside_tool_call = False
+        self._inside_thought = False
+        self._thought_end = ""
+        self.displayed_answer = ""
+
+    def feed(self, chunk: str) -> str:
+        self._buffer += chunk
+        output: list[str] = []
+        while self._buffer:
+            if self._inside_tool_call:
+                end = self._buffer.find(_INLINE_TOOL_END)
+                if end == -1:
+                    keep = self._pending_prefix_len((_INLINE_TOOL_END,))
+                    self._buffer = self._buffer[-keep:] if keep else ""
+                    break
+                self._buffer = self._buffer[end + len(_INLINE_TOOL_END) :]
+                self._inside_tool_call = False
+                continue
+
+            if self._inside_thought:
+                end = self._buffer.find(self._thought_end)
+                if end == -1:
+                    keep = self._pending_prefix_len((self._thought_end,))
+                    if len(self._buffer) <= keep:
+                        break
+                    output.append(self._format_thinking(self._buffer[:-keep]))
+                    self._buffer = self._buffer[-keep:] if keep else ""
+                    break
+                output.append(self._format_thinking(self._buffer[:end]))
+                output.append("\n")
+                self._buffer = self._buffer[end + len(self._thought_end) :]
+                self._inside_thought = False
+                self._thought_end = ""
+                continue
+
+            start = self._buffer.find(_INLINE_TOOL_START)
+            thought_start, thought_token, thought_end = self._find_thought_start()
+            starts = [(start, _INLINE_TOOL_START, "tool")]
+            if thought_start != -1:
+                starts.append((thought_start, thought_token, thought_end))
+            starts = [candidate for candidate in starts if candidate[0] != -1]
+            if starts:
+                first_start, token, kind = min(starts, key=lambda item: item[0])
+                normal = self._buffer[:first_start]
+                output.append(normal)
+                self.displayed_answer += normal
+                self._buffer = self._buffer[first_start + len(token) :]
+                if kind == "tool":
+                    self._inside_tool_call = True
+                else:
+                    output.append("thinking:\n  ")
+                    self._inside_thought = True
+                    self._thought_end = kind
+                continue
+
+            keep = self._pending_prefix_len((_INLINE_TOOL_START, *_THOUGHT_STREAM_STARTS))
+            if keep == len(self._buffer):
+                break
+            normal = self._buffer[:-keep] if keep else self._buffer
+            output.append(normal)
+            self.displayed_answer += normal
+            self._buffer = self._buffer[-keep:] if keep else ""
+            break
+
+        return "".join(output)
+
+    def finish(self) -> str:
+        if self._inside_tool_call:
+            text = ""
+        elif self._inside_thought:
+            text = self._format_thinking(self._buffer)
+        else:
+            text = self._buffer
+            self.displayed_answer += text
+        self._buffer = ""
+        return text
+
+    def _find_thought_start(self) -> tuple[int, str, str]:
+        matches = [
+            (self._buffer.find(start), start, end)
+            for start, end in zip(_THOUGHT_STREAM_STARTS, _THOUGHT_STREAM_ENDS, strict=True)
+            if self._buffer.find(start) != -1
+        ]
+        return min(matches, key=lambda item: item[0]) if matches else (-1, "", "")
+
+    def _format_thinking(self, text: str) -> str:
+        return text.replace("\n", "\n  ")
+
+    def _pending_prefix_len(self, markers: tuple[str, ...]) -> int:
+        pending = 0
+        for marker in markers:
+            for length in range(1, min(len(marker), len(self._buffer)) + 1):
+                if self._buffer.endswith(marker[:length]):
+                    pending = max(pending, length)
+        return pending
 
 
 def clean_model_output(content: str) -> str:
@@ -168,6 +273,33 @@ class Agent:
 
         raise RuntimeError("Agent reached max_steps before producing a final answer")
 
+    def stream_messages_with_result(self, messages: list[Message], on_chunk: Callable[[str], object] | None = None) -> AgentResult | None:
+        if not _supports_streaming(self.model):
+            return None
+        schemas = self._tool_schemas()
+        chunks: list[str] = []
+        display_filter = _StreamDisplayFilter()
+        for chunk in self.model.stream_chat(messages, schemas):
+            chunks.append(chunk)
+            if on_chunk is not None:
+                display = display_filter.feed(chunk)
+                if display:
+                    on_chunk(display)
+        if on_chunk is not None:
+            display = display_filter.finish()
+            if display:
+                on_chunk(display)
+        content = "".join(chunks)
+        result = split_model_output(content)
+        inline_calls = parse_inline_tool_calls(result.answer)
+        if inline_calls:
+            answer = self._run_inline_tool_calls(inline_calls, strip_inline_tool_calls(result.answer))
+            self._stream_missing_tail(answer, display_filter.displayed_answer, on_chunk)
+            return AgentResult(answer=answer, thinking=result.thinking, streamed=on_chunk is not None)
+        answer = result.answer
+        self._stream_missing_tail(answer, display_filter.displayed_answer, on_chunk)
+        return AgentResult(answer=answer, thinking=result.thinking, streamed=on_chunk is not None)
+
     def _tool_schemas(self) -> list[dict[str, object]] | None:
         if not self.tools:
             return None
@@ -187,6 +319,21 @@ class Agent:
             lines.append(f"tool {call.name} completed: {json.dumps(result, ensure_ascii=False)}")
         return "\n".join(lines).strip()
 
+    def _stream_missing_tail(self, answer: str, displayed: str, on_chunk: Callable[[str], object] | None) -> None:
+        if on_chunk is None:
+            return
+        if not answer or answer == displayed:
+            return
+        if displayed and answer.startswith(displayed):
+            tail = answer[len(displayed) :]
+        else:
+            displayed_clean = displayed.strip()
+            if not displayed_clean or not answer.startswith(displayed_clean):
+                displayed_clean = ""
+            tail = answer
+        if tail:
+            on_chunk(tail)
+
     def _tool_call_message(self, call: ToolCall, index: int) -> dict[str, object]:
         return {
             "type": "function",
@@ -196,6 +343,10 @@ class Agent:
                 "arguments": call.arguments,
             },
         }
+
+
+def _supports_streaming(model: ChatModel) -> bool:
+    return callable(getattr(model, "stream_chat", None))
 
 
 def default_model_name(model: str | None = None, backend: str | None = None, log: VerboseLogger | None = None) -> str:

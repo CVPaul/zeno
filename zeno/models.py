@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 
 from .types import ChatResponse, Message, ToolCall
@@ -61,6 +61,35 @@ def _parse_tool_calls(raw_calls: object) -> list[ToolCall]:
             raise RuntimeError("Model response tool_call has invalid function shape")
         calls.append(ToolCall(name=name, arguments=arguments))
     return calls
+
+
+def _chat_request(url: str, payload: Mapping[str, object], api_key: str) -> urllib.request.Request:
+    data = json.dumps(payload).encode("utf-8")
+    return urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+        method="POST",
+    )
+
+
+def _openai_content_from_chunk(chunk: object) -> str:
+    if not isinstance(chunk, dict):
+        return ""
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return ""
+    first = choices[0]
+    if not isinstance(first, dict):
+        return ""
+    delta = first.get("delta")
+    if not isinstance(delta, dict):
+        return ""
+    content = delta.get("content")
+    return content if isinstance(content, str) else ""
 
 
 @dataclass
@@ -148,16 +177,7 @@ class OpenAICompatibleChatModel:
         if tools:
             payload["tools"] = tools
 
-        data = json.dumps(payload).encode("utf-8")
-        request = urllib.request.Request(
-            f"{self.base_url.rstrip('/')}/chat/completions",
-            data=data,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
-            method="POST",
-        )
+        request = _chat_request(f"{self.base_url.rstrip('/')}/chat/completions", payload, self.api_key)
 
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
@@ -183,3 +203,36 @@ class OpenAICompatibleChatModel:
         if not isinstance(content, str):
             raise RuntimeError("OpenAI-compatible message content must be a string")
         return ChatResponse(content=content, tool_calls=_parse_tool_calls(message.get("tool_calls")))
+
+    def stream_chat(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, object]] | None = None,
+    ) -> Iterator[str]:
+        payload: dict[str, object] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": True,
+        }
+        if tools:
+            payload["tools"] = tools
+
+        request = _chat_request(f"{self.base_url.rstrip('/')}/chat/completions", payload, self.api_key)
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                for raw_line in response:
+                    line = raw_line.decode("utf-8").strip()
+                    if not line or not line.startswith("data:"):
+                        continue
+                    data = line.removeprefix("data:").strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except json.JSONDecodeError as exc:
+                        raise RuntimeError(f"Model endpoint returned invalid stream chunk: {data[:200]}") from exc
+                    content = _openai_content_from_chunk(chunk)
+                    if content:
+                        yield content
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"Could not reach local model endpoint: {self.base_url}") from exc

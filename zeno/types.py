@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -28,3 +28,12 @@ class ChatModel(Protocol):
         tools: list[dict[str, object]] | None = None,
     ) -> ChatResponse:
         """Return the assistant response for a list of chat messages."""
+
+
+class StreamingChatModel(ChatModel, Protocol):
+    def stream_chat(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, object]] | None = None,
+    ) -> Iterator[str]:
+        """Yield assistant response text chunks as they arrive."""

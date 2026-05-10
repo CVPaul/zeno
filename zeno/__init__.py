@@ -4,7 +4,7 @@ from .models import DEFAULT_MLX_MODEL, MLXChatModel, OllamaChatModel, OpenAIComp
 from .ollama import OllamaManager
 from .sessions import ChatSession, SessionStore
 from .tools import default_tools
-from .types import ChatModel, ChatResponse, Message, Tool, ToolCall
+from .types import ChatModel, ChatResponse, Message, StreamingChatModel, Tool, ToolCall
 from .vllm_family import DEFAULT_VLLM_MODEL, VllmFamilyManager, default_backend
 
 __all__ = [
@@ -24,6 +24,7 @@ __all__ = [
     "OpenAICompatibleChatModel",
     "parse_inline_tool_calls",
     "SessionStore",
+    "StreamingChatModel",
     "Tool",
     "ToolCall",
     "VllmFamilyManager",
