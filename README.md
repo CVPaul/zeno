@@ -35,38 +35,14 @@ Zeno 会按平台选择后端：
 - macOS arm64：`vllm-mlx`
 - 其它平台：`vllm`
 
-如果安装了 `llmfit`（`.[mac]` / `.[cuda]` 会安装），Zeno 会先调用：
-
-```bash
-llmfit recommend --json --limit 1 --use-case coding --force-runtime <runtime>
-```
-
-然后用推荐模型启动服务；没有 `llmfit` 时回退到内置默认模型。
-
-查看 `llmfit` 给出的多个候选模型：
-
-```bash
-zeno models
-zeno --backend vllm-mlx models --limit 10
-```
-
-默认启动会自动选择第一个候选；你可以用 `--model` 手动指定任意候选或其它 Hugging Face 模型：
+默认启动使用对应后端的内置默认模型；你可以先自己选好模型，再用 `--model` 告诉 Zeno：
 
 ```bash
 zeno --model Qwen/Qwen3-Coder-30B-A3B-Instruct
 zeno --backend vllm-mlx --model mlx-community/Qwen2.5-14B-Instruct-4bit
 ```
 
-也可以在启动前交互式选择：
-
-```bash
-zeno --select-model
-zeno --backend vllm-mlx --select-model serve
-```
-
-交互模式会展示候选列表；输入编号选择，直接回车使用第一个，或者粘贴任意自定义模型 ID。
-
-Zeno 会把你通过 `--select-model` 或 `--model` 选过的模型按 backend 保存到当前目录的 `.zeno/config.json`。下次在同一个 workspace 运行时，优先使用上次选好的模型，而不是重新取 `llmfit` 的第一个候选。优先级是：`--model` 明确指定 > `--select-model` 重新选择 > `.zeno/config.json` 保存的模型 > `llmfit` 自动推荐 > 内置默认模型。
+Zeno 会把你通过 `--model` 选过的模型按 backend 保存到当前目录的 `.zeno/config.json`。下次在同一个 workspace 运行时，优先使用上次选好的模型。优先级是：`--model` 明确指定 > `.zeno/config.json` 保存的模型 > 内置默认模型。
 
 也可以手动指定：
 
@@ -83,7 +59,7 @@ zeno --backend vllm --device cpu -v serve
 
 注意：CPU mode 依赖当前 vLLM wheel 是否支持 CPU backend；生产默认仍建议 CUDA/Linux 或 vLLM-MLX/Mac。
 
-第一次运行会下载/加载模型，尤其是 `llmfit` 推荐 30B 这类大模型时可能明显超过 2 分钟。Zeno 默认会等 30 分钟；需要看卡在哪里时加 `-v`：
+第一次运行会下载/加载模型，大模型可能明显超过 2 分钟。Zeno 默认会等 30 分钟；需要看卡在哪里时加 `-v`：
 
 ```bash
 zeno -v
@@ -97,7 +73,7 @@ zeno -v --startup-timeout 3600
 ZENO_STARTUP_TIMEOUT=3600 zeno -v
 ```
 
-Verbose 模式会把后端选择、`llmfit` 推荐/回退、启动命令、`/v1/models` readiness 轮询打印到 stderr；后端进程自身输出也会显示出来，方便判断是在下载模型、编译 kernel，还是服务没有启动成功。Hugging Face 提示未登录时，可以设置 `HF_TOKEN` 提高下载限额和速度。
+Verbose 模式会把后端选择、模型选择、启动命令、`/v1/models` readiness 轮询打印到 stderr；后端进程自身输出也会显示出来，方便判断是在下载模型、编译 kernel，还是服务没有启动成功。Hugging Face 提示未登录时，可以设置 `HF_TOKEN` 提高下载限额和速度。
 
 ## 任务命令
 
@@ -107,7 +83,7 @@ Verbose 模式会把后端选择、`llmfit` 推荐/回退、启动命令、`/v1/
 zeno serve
 ```
 
-它会使用 `llmfit` 推荐的模型；如果 `llmfit` 不可用，就使用内置默认模型。
+它会使用当前 workspace 保存的模型；如果没有保存过，就使用内置默认模型。
 
 执行一次性任务：
 
