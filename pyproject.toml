@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "zeno-local-agent"
+name = "zeno"
 version = "0.1.0"
 description = "A minimal local-first agent framework and CLI."
 readme = "README.md"
