@@ -9,7 +9,6 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from .llmfit import recommend_model
 from .logging import VerboseLogger
 
 
@@ -30,9 +29,6 @@ def default_model_name(model: str | None = None, backend: str | None = None, log
             log(f"using explicit model: {model}")
         return model
     selected_backend = backend or default_backend()
-    recommendation = recommend_model(selected_backend, log=log)
-    if recommendation is not None:
-        return recommendation.model
     if selected_backend == "vllm-mlx":
         if log is not None:
             log(f"using built-in default model for vllm-mlx: {DEFAULT_MLX_MODEL}")
