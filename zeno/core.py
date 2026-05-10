@@ -17,6 +17,10 @@ _THOUGHT_PATTERNS = (
     re.compile(r"<\|channel>thought(?P<thinking>[\s\S]*?)<channel\|>"),
     re.compile(r"<think>(?P<thinking>[\s\S]*?)</think>", re.IGNORECASE),
 )
+_INLINE_TOOL_CALL_PATTERN = re.compile(r"<\|tool_call>(?P<body>[\s\S]*?)<tool_call\|>")
+_INLINE_TOOL_HEADER_PATTERN = re.compile(r"^call:(?P<name>[A-Za-z_][A-Za-z0-9_]*)\{(?P<arguments>[\s\S]*)\}$")
+_INLINE_STRING_START = '<|"|>'
+_INLINE_STRING_END = '<|"|>'
 
 
 @dataclass(frozen=True)
@@ -36,6 +40,50 @@ def split_model_output(content: str) -> AgentResult:
         thinking.extend(match.group("thinking").strip() for match in pattern.finditer(cleaned) if match.group("thinking").strip())
         cleaned = pattern.sub("", cleaned)
     return AgentResult(answer=cleaned.strip(), thinking="\n\n".join(thinking))
+
+
+def parse_inline_tool_calls(content: str) -> list[ToolCall]:
+    calls: list[ToolCall] = []
+    for match in _INLINE_TOOL_CALL_PATTERN.finditer(content):
+        header = _INLINE_TOOL_HEADER_PATTERN.match(match.group("body").strip())
+        if header is None:
+            continue
+        calls.append(ToolCall(name=header.group("name"), arguments=_parse_inline_arguments(header.group("arguments"))))
+    return calls
+
+
+def strip_inline_tool_calls(content: str) -> str:
+    return _INLINE_TOOL_CALL_PATTERN.sub("", content).strip()
+
+
+def _parse_inline_arguments(text: str) -> dict[str, object]:
+    arguments: dict[str, object] = {}
+    index = 0
+    while index < len(text):
+        while index < len(text) and text[index] in {",", " ", "\n", "\t"}:
+            index += 1
+        key_start = index
+        while index < len(text) and (text[index].isalnum() or text[index] == "_"):
+            index += 1
+        if key_start == index:
+            break
+        key = text[key_start:index]
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text) or text[index] != ":":
+            break
+        index += 1
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if not text.startswith(_INLINE_STRING_START, index):
+            break
+        index += len(_INLINE_STRING_START)
+        value_end = text.find(_INLINE_STRING_END, index)
+        if value_end == -1:
+            break
+        arguments[key] = text[index:value_end]
+        index = value_end + len(_INLINE_STRING_END)
+    return arguments
 
 
 def _json_type(annotation: object) -> str:
@@ -95,7 +143,11 @@ class Agent:
         for _ in range(self.max_steps):
             response = self.model.chat(messages, schemas)
             if not response.tool_calls:
-                return split_model_output(response.content)
+                result = split_model_output(response.content)
+                inline_calls = parse_inline_tool_calls(result.answer)
+                if inline_calls:
+                    return AgentResult(answer=self._run_inline_tool_calls(inline_calls, strip_inline_tool_calls(result.answer)), thinking=result.thinking)
+                return result
 
             messages.append(
                 {
@@ -125,6 +177,15 @@ class Agent:
         if not self.tools or call.name not in self.tools:
             raise RuntimeError(f"Unknown tool: {call.name}")
         return self.tools[call.name](**call.arguments)
+
+    def _run_inline_tool_calls(self, calls: list[ToolCall], message: str) -> str:
+        lines: list[str] = []
+        if message:
+            lines.append(message)
+        for call in calls:
+            result = self._call_tool(call)
+            lines.append(f"tool {call.name} completed: {json.dumps(result, ensure_ascii=False)}")
+        return "\n".join(lines).strip()
 
     def _tool_call_message(self, call: ToolCall, index: int) -> dict[str, object]:
         return {

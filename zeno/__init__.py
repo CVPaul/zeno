@@ -1,5 +1,5 @@
 from .config import ConfigStore
-from .core import Agent, AgentResult, clean_model_output, default_local_model, default_model_name, ensure_default_local_model, split_model_output, tool_schema
+from .core import Agent, AgentResult, clean_model_output, default_local_model, default_model_name, ensure_default_local_model, parse_inline_tool_calls, split_model_output, strip_inline_tool_calls, tool_schema
 from .models import DEFAULT_MLX_MODEL, MLXChatModel, OllamaChatModel, OpenAICompatibleChatModel
 from .ollama import OllamaManager
 from .sessions import ChatSession, SessionStore
@@ -22,6 +22,7 @@ __all__ = [
     "OllamaChatModel",
     "OllamaManager",
     "OpenAICompatibleChatModel",
+    "parse_inline_tool_calls",
     "SessionStore",
     "Tool",
     "ToolCall",
@@ -32,5 +33,6 @@ __all__ = [
     "default_tools",
     "ensure_default_local_model",
     "split_model_output",
+    "strip_inline_tool_calls",
     "tool_schema",
 ]
