@@ -2,12 +2,20 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
+from collections.abc import Callable, Iterable
 
-from .core import Agent, ensure_default_local_model
+from .core import Agent, AgentResult, ensure_default_local_model
 from .config import ConfigStore
 from .logging import verbose_logger
 from .vllm_family import default_backend
 from .sessions import SessionStore
+from .types import Message
+
+
+COMPACT_AFTER_MESSAGES = 24
+KEEP_RECENT_MESSAGES = 12
+TYPEWRITER_DELAY = 0.005
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -45,12 +53,12 @@ def run_chat(agent: Agent, store: SessionStore | None = None, session_id: str | 
             break
         session_store.append(session_id, "user", prompt)
         try:
-            answer = run_with_session_history(agent, session_store, session_id)
+            result = run_with_session_history(agent, session_store, session_id)
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
-        session_store.append(session_id, "assistant", answer)
-        print(answer)
+        session_store.append(session_id, "assistant", result.answer)
+        print_agent_result(result)
     return 0
 
 
@@ -72,24 +80,78 @@ def run_task(description: str, agent: Agent, store: SessionStore | None = None) 
     session_id = session_store.create()
     session_store.append(session_id, "user", description)
     try:
-        answer = run_with_session_history(agent, session_store, session_id)
+        result = run_with_session_history(agent, session_store, session_id)
     except RuntimeError as exc:
         session_store.delete(session_id)
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    session_store.append(session_id, "assistant", answer)
-    print(answer)
+    session_store.append(session_id, "assistant", result.answer)
+    print_agent_result(result)
     return 0
 
 
-def run_with_session_history(agent: Agent, store: SessionStore, session_id: str) -> str:
-    messages = [{"role": "system", "content": agent.system}]
-    for message in store.messages(session_id):
+def run_with_session_history(agent: Agent, store: SessionStore, session_id: str) -> AgentResult:
+    messages: list[Message] = [{"role": "system", "content": agent.system}]
+    for message in compact_messages(store.messages(session_id)):
         role = message.get("role")
         content = message.get("content")
         if role in {"user", "assistant"} and isinstance(content, str):
             messages.append({"role": role, "content": content})
-    return agent.run_messages(messages)
+    return agent.run_messages_with_result(messages)
+
+
+def print_agent_result(result: AgentResult) -> None:
+    if result.thinking:
+        print_thinking(result.thinking)
+    typewriter_print(result.answer)
+
+
+def print_thinking(thinking: str) -> None:
+    print("thinking:")
+    for line in thinking.strip().splitlines():
+        print(f"  {line}")
+    print()
+
+
+def compact_messages(messages: list[dict[str, object]]) -> list[dict[str, object]]:
+    if len(messages) <= COMPACT_AFTER_MESSAGES:
+        return messages
+    recent = messages[-KEEP_RECENT_MESSAGES:]
+    older = messages[:-KEEP_RECENT_MESSAGES]
+    summary = summarize_messages(older)
+    if not summary:
+        return recent
+    return [{"role": "assistant", "content": summary}] + recent
+
+
+def summarize_messages(messages: Iterable[dict[str, object]]) -> str:
+    lines: list[str] = ["Earlier conversation summary:"]
+    for message in messages:
+        role = message.get("role")
+        content = message.get("content")
+        if role not in {"user", "assistant"} or not isinstance(content, str) or not content.strip():
+            continue
+        compact = " ".join(content.strip().split())
+        if len(compact) > 240:
+            compact = f"{compact[:237]}..."
+        lines.append(f"- {role}: {compact}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def typewriter_print(text: str, delay: float = TYPEWRITER_DELAY, write: Callable[[str], object] | None = None, flush: Callable[[], object] | None = None) -> None:
+    writer = write or sys.stdout.write
+    flusher = flush or sys.stdout.flush
+    if not text:
+        writer("\n")
+        flusher()
+        return
+    for character in text:
+        writer(character)
+        flusher()
+        if delay > 0:
+            time.sleep(delay)
+    writer("\n")
+    flusher()
 
 
 def main(argv: list[str] | None = None, agent: Agent | None = None, store: SessionStore | None = None, config: ConfigStore | None = None) -> int:
