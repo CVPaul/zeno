@@ -1,5 +1,5 @@
 from .config import ConfigStore
-from .core import Agent, default_local_model, default_model_name, ensure_default_local_model, tool_schema
+from .core import Agent, AgentResult, clean_model_output, default_local_model, default_model_name, ensure_default_local_model, split_model_output, tool_schema
 from .models import DEFAULT_MLX_MODEL, MLXChatModel, OllamaChatModel, OpenAICompatibleChatModel
 from .ollama import OllamaManager
 from .sessions import ChatSession, SessionStore
@@ -8,12 +8,14 @@ from .vllm_family import DEFAULT_VLLM_MODEL, VllmFamilyManager, default_backend
 
 __all__ = [
     "Agent",
+    "AgentResult",
     "DEFAULT_MLX_MODEL",
     "DEFAULT_VLLM_MODEL",
     "ChatModel",
     "ChatResponse",
     "ChatSession",
     "ConfigStore",
+    "clean_model_output",
     "Message",
     "MLXChatModel",
     "OllamaChatModel",
@@ -27,5 +29,6 @@ __all__ = [
     "default_local_model",
     "default_model_name",
     "ensure_default_local_model",
+    "split_model_output",
     "tool_schema",
 ]

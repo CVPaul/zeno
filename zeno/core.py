@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import json
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -10,6 +11,31 @@ from .logging import VerboseLogger
 from .models import OpenAICompatibleChatModel
 from .types import ChatModel, Message, Tool, ToolCall
 from .vllm_family import DEFAULT_STARTUP_TIMEOUT, VllmFamilyManager, default_backend, default_model_name as platform_default_model_name
+
+
+_THOUGHT_PATTERNS = (
+    re.compile(r"<\|channel>thought(?P<thinking>[\s\S]*?)<channel\|>"),
+    re.compile(r"<think>(?P<thinking>[\s\S]*?)</think>", re.IGNORECASE),
+)
+
+
+@dataclass(frozen=True)
+class AgentResult:
+    answer: str
+    thinking: str = ""
+
+
+def clean_model_output(content: str) -> str:
+    return split_model_output(content).answer
+
+
+def split_model_output(content: str) -> AgentResult:
+    thinking: list[str] = []
+    cleaned = content
+    for pattern in _THOUGHT_PATTERNS:
+        thinking.extend(match.group("thinking").strip() for match in pattern.finditer(cleaned) if match.group("thinking").strip())
+        cleaned = pattern.sub("", cleaned)
+    return AgentResult(answer=cleaned.strip(), thinking="\n\n".join(thinking))
 
 
 def _json_type(annotation: object) -> str:
@@ -61,12 +87,15 @@ class Agent:
         return self.run_messages(messages)
 
     def run_messages(self, messages: list[Message]) -> str:
+        return self.run_messages_with_result(messages).answer
+
+    def run_messages_with_result(self, messages: list[Message]) -> AgentResult:
         schemas = self._tool_schemas()
 
         for _ in range(self.max_steps):
             response = self.model.chat(messages, schemas)
             if not response.tool_calls:
-                return response.content.strip()
+                return split_model_output(response.content)
 
             messages.append(
                 {
